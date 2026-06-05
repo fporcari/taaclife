@@ -135,3 +135,66 @@ senza token.
 
 - Migrazione: `DATABASE_URL=sqlite:///./_check.db alembic upgrade head` crea
   la tabella `users`; `alembic downgrade base` la rimuove (verificato).
+
+---
+
+## Fase 3 — Modello dati
+
+Obiettivo (PROJECT.md §5 e §12.3): tutte le tabelle del modello dati con
+migrazioni Alembic. `diary_entries` NON salva kcal/macro (vincolo duro §2/§5).
+Test che migrazioni applicano e rollback è pulito.
+
+### Decisioni di fase
+
+- Una sola revisione `0002_create_core_schema` con tutte le tabelle (più
+  semplice da rollbackare in blocco; il goal chiede "rollback puliti").
+- PK intere autoincrement su tutte le tabelle salvo `users` (UUID stringa,
+  già esistente da F2).
+- Enum gestiti come `String` con `CHECK` constraint esplicito; lato Python
+  `enum.StrEnum`.
+- `profiles.calc_basis` ('F'|'M'|null) separato da `profiles.sex`
+  ('F'|'M'|'other'|null), come §14: identità ≠ parametro di calcolo.
+- `diary_entries` minimale: `user_id, consumed_at, meal, food_id, grams`.
+  Nessuna colonna `kcal_*`, `protein_*`, ecc. (i numeri li fa il motore).
+- `preferences`: SQLite non ha array → tabella `preference_items(user_id,
+  kind, value)` con `kind in {'liked','avoided'}`. Portabile a Postgres.
+- Timestamp `DateTime(timezone=True)` ovunque; `measured_at` come `Date`.
+- ON DELETE: CASCADE su tutto ciò che è "di proprietà" dell'utente; SET NULL
+  su `foods.created_by` (gli alimenti personali sopravvivono all'utente);
+  RESTRICT su `diary_entries.food_id` (non si cancella un food con voci).
+- CHECK `grams > 0` su `diary_entries` e `portions`.
+- `foods`: indice su `name` per la ricerca della Fase 4; `is_public` NOT NULL.
+
+### Vincoli duri rispettati
+
+- `diary_entries` snello, niente kcal/macro denormalizzati: test apposito
+  che ispeziona la tabella e fallisce se compaiono colonne `kcal*/macro*`.
+- Alimenti da crudo: la convenzione vive nei commenti del seed (Fase 4),
+  ma `foods.kcal_100g` ecc. sono "per 100 g di alimento crudo".
+- Nessuna API key nel codice (nessuna nuova rotta che chiama l'LLM in F3).
+
+### Checklist
+
+- [x] `app/models.py`: aggiunti `Profile`, `WeightLog`, `Food`, `Portion`,
+      `DiaryEntry`, `PreferenceItem`, `ChatMessage` + tutti gli enum.
+- [x] `alembic/versions/0002_create_core_schema.py`: crea tutte le tabelle
+      con FK, CHECK, indici. `downgrade()` rimuove tutto in ordine inverso.
+- [x] Bug fix `alembic/env.py`: non sovrascrivere `sqlalchemy.url` se già
+      impostata (era il motivo per cui le migrazioni programmatiche
+      finivano sul file di default `./nutricoach.db`).
+- [x] `tests/test_migrations.py`: upgrade head, downgrade base, ispezione
+      `diary_entries` per assenza di colonne kcal/macro.
+- [x] `tests/test_models.py`: User+Profile 1-to-1, CHECK enum, CHECK
+      `grams>0`, CHECK altezza, CASCADE su utente, RESTRICT su food,
+      unique weight per giorno, unique preference triple.
+- [x] `pytest` verde: 29 passed.
+- [x] CLI end-to-end: `alembic upgrade head` crea 8 tabelle, `downgrade base`
+      lascia solo `alembic_version`.
+- [x] Commit di fine fase citando la Fase 3.
+
+### Verifica end-to-end (manuale)
+
+- `alembic upgrade head` su `_check.db` crea 8 tabelle (users +
+  profiles + weight_logs + foods + portions + diary_entries +
+  preference_items + chat_messages) + `alembic_version`. (verificato)
+- `alembic downgrade base` lascia solo `alembic_version`. (verificato)
