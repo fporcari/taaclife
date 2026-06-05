@@ -13,6 +13,7 @@ def test_home_renders_shell(client: TestClient) -> None:
     body = r.text
     assert "NutriCoach" in body
     assert "Oggi" in body
+    assert "Profilo" in body
     assert "Gusti" in body
     assert "Peso" in body
     assert "Coach" in body
@@ -53,7 +54,7 @@ def test_static_js_served(client: TestClient) -> None:
 
 
 def test_section_modules_served(client: TestClient) -> None:
-    for name in ["oggi", "gusti", "peso", "coach"]:
+    for name in ["oggi", "profilo", "gusti", "peso", "coach"]:
         r = client.get(f"/static/sections/{name}.js")
         assert r.status_code == 200, f"sezione {name} non servita"
         assert "export" in r.text

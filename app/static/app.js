@@ -65,7 +65,7 @@ function bindHideCaloriesToggle() {
 
 // ---------------- Sezioni (lazy load via fetch) ----------------
 
-const SECTIONS = ["oggi", "gusti", "peso", "coach"];
+const SECTIONS = ["oggi", "profilo", "gusti", "peso", "coach"];
 
 async function loadSection(name) {
   const main = document.getElementById("section");
