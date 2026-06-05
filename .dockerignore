@@ -1,0 +1,37 @@
+.git
+.gitignore
+.github/
+
+# Python build/test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Secrets e dati locali (mai nell'immagine)
+.env
+.env.*
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Docs di progetto: non servono dentro l'immagine
+PROJECT.md
+PROMPT-CLAUDE-CODE.md
+DEPLOY-HETZNER.md
+README.md
+tasks/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
