@@ -64,3 +64,74 @@ Fase completa quando `pytest` passa e tutto è committato.
 
 - Auth, modello dati esteso, migrazioni reali, seed alimenti, motore di
   calcolo, coach, frontend, `build.sh`.
+
+---
+
+## Fase 2 — Auth
+
+Obiettivo (PROJECT.md §9 e §12.2): tabella `users`, `POST /auth/register`,
+`POST /auth/login`, `POST /auth/refresh` con JWT access+refresh, hashing
+password con argon2. Ogni rotta protetta ricava l'utente dal token (mai
+da input del client). Test su registrazione, login, refresh, accesso negato
+senza token.
+
+### Decisioni di fase
+
+- Hashing: `argon2-cffi` (default OWASP, no toolchain nativa pesante).
+- JWT: `pyjwt`, algoritmo `HS256`. Access TTL 15 min, refresh TTL 7 giorni.
+- Token discriminato da claim `type` (`access` | `refresh`): rotte di refresh
+  accettano solo `type=refresh`, dipendenze di accesso solo `type=access`.
+- `User.id` come UUID stringa (TEXT in SQLite) generato a livello applicativo.
+- Migrazione Alembic `0001_create_users.py` (prima revisione del progetto).
+  Le altre tabelle di PROJECT.md §5 arrivano in Fase 3.
+- Rotta probe protetta `GET /auth/me` per testare il vincolo "utente dal token".
+- Test su DB SQLite file temporaneo (`tmp_path`) con override della dipendenza
+  `get_db`. Schema creato con `Base.metadata.create_all` nei test (no Alembic
+  nei test, ma la migrazione resta verificata a parte).
+- Niente refresh rotation né blacklist in F2: hardening è Fase 10.
+
+### Vincoli duri rispettati
+
+- `JWT_SECRET`/`JWT_REFRESH_SECRET` solo da `.env` via settings (mai hardcoded).
+- `ANTHROPIC_API_KEY` non tocca questa fase.
+- `user_id` ricavato sempre dal token, mai da body/query/path.
+- Tono non giudicante: gli errori parlano di "credenziali non valide", senza
+  rivelare se è la mail o la password (niente shaming né enumeration).
+
+### Checklist
+
+- [x] `app/security.py`: `hash_password`, `verify_password` (argon2);
+      `create_access_token`, `create_refresh_token`, `decode_token` (PyJWT,
+      validazione `type`, `sub`, `exp`).
+- [x] `app/models.py`: `User` (id TEXT pk, email unique, password_hash,
+      created_at). `Base` riusato da `app.db`.
+- [x] `app/schemas/__init__.py` + `app/schemas/auth.py`:
+      `RegisterIn`, `LoginIn`, `RefreshIn`, `TokenPair`, `UserOut`.
+- [x] `app/deps.py`: `get_db()` generator (yield session, close finally) +
+      `get_current_user(...)` che decodifica access token e fa lookup.
+- [x] `app/auth/__init__.py` + `app/auth/router.py`:
+      register / login / refresh / me.
+- [x] `app/main.py`: include router auth.
+- [x] `alembic/versions/0001_create_users.py`: prima revisione, crea `users`.
+- [x] `alembic/env.py`: importa `app.models` per popolare `Base.metadata`.
+- [x] `requirements.txt`: aggiunte `argon2-cffi`, `PyJWT`, `email-validator`.
+- [x] `tests/conftest.py`: fixture `db_engine` (engine SQLite su `tmp_path`
+      con `dispose()` in teardown), `db_session`, `client` con override di
+      `get_db`. Settings di test via env (`JWT_SECRET`/`JWT_REFRESH_SECRET`).
+- [x] `tests/test_auth.py`: registrazione (OK / duplicato / case-insensitive
+      / password debole), login (OK / password errata / email inesistente
+      stesso 401 → no enumeration), refresh (OK / rifiuta access token),
+      `/auth/me` (no token → 401 / access valido → 200 / refresh → 401 /
+      scaduto → 401 / tampered → 401).
+- [x] `tests/test_db.py`: aggiunto `engine.dispose()` per evitare
+      `ResourceWarning` con `filterwarnings = ["error"]`.
+- [x] `pytest` verde: 17 passed.
+- [x] Migrazione Alembic verificata: upgrade crea `users`, downgrade la
+      rimuove.
+- [x] Commit di fine fase citando la Fase 2.
+- [x] Spuntare tutto qui sopra.
+
+### Verifica end-to-end (manuale, oltre a pytest)
+
+- Migrazione: `DATABASE_URL=sqlite:///./_check.db alembic upgrade head` crea
+  la tabella `users`; `alembic downgrade base` la rimuove (verificato).
