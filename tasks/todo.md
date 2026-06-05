@@ -363,3 +363,80 @@ edge case. Requisito etico §7 rispettato.
 
 - Importare `core.nutrition` e calcolare un caso noto in REPL:
   donna 35/65/168 moderata -> TDEE 2114.2; verificato.
+
+---
+
+## Fase 6 — Diario + summary
+
+Obiettivo (PROJECT.md §9 e §12.6): rotte `/diary` (POST/GET/DELETE) e
+`/summary/*` (day/week/needs) che usano il motore di Fase 5 per i calcoli.
+Tutto scoped sull'utente del token.
+
+### Decisioni di fase
+
+- **Le rotte profile/weights NON vengono create qui** (sono Fase 7 di
+  PROJECT.md §12). `/summary/needs` ha pero' bisogno del profilo e
+  dell'ultimo peso: se mancano, risponde 422 con `missing`. Nei test
+  riempio profile/weight_logs direttamente via session (la Fase 7
+  esporra' le rotte).
+- **Adapter motore <-> DB** in `app/summary/adapter.py`:
+  - `core_profile_from_db(user) -> core.Profile`: usa `Profile` (per
+    calc_basis/activity_level/goal/height/age) e l'ultimo `WeightLog`
+    (per `weight_kg`). Eta' calcolata da `birth_date` rispetto a `today`.
+  - `core_item_from_entry(entry) -> core.DiaryItem`: usa il `Food`
+    collegato (eager load nel router).
+- **Range giorno in UTC**: `consumed_at >= start AND < start + 1 day`.
+  La query param `date` e' un `YYYY-MM-DD`. Niente fusi orari in F6.
+- **Settimana**: 7 giorni consecutivi a partire da `from` (default oggi
+  UTC). Ritorna 7 `DailyBalance` (uno per giorno) anche se vuoti.
+- **DELETE /diary/{id}** di un'altra utente: 404 (non 403, niente
+  info leak sull'esistenza).
+- **POST /diary**: `food_id` deve essere visibile all'utente (pubblico
+  oppure di sua proprieta'), altrimenti 404.
+- **Risposta `/summary/needs` con profilo incompleto**: 422 con detail
+  `{missing: "weight_kg"}` ecc. Mai numero finto (vincolo §2).
+- **Niente giudizi nelle response**: il `DailyBalance` viene serializzato
+  cosi' com'e' (totals + target + diff + macros_percent). L'UI/LLM
+  formattera'.
+- **Profilo "incompleto vs assunto"**: se calc_basis/activity_level
+  sono `None` il motore usa fallback con flag `*_assumed=True`; la
+  response li propaga. NON e' un errore (e' info dichiarata).
+
+### Vincoli duri rispettati
+
+- I numeri (totali, target, diff, BMR/TDEE) sono SEMPRE prodotti dal
+  motore (`core.nutrition`): test che verifica match esatto fra
+  response e calcolo diretto del motore sugli stessi input.
+- Tutte le rotte scoped: `user_id = current_user.id`. Mai accettato
+  da body/query/path. Test su Alice/Bob.
+- Nessuna nuova dipendenza LLM in F6.
+
+### Checklist
+
+- [x] `app/schemas/diary.py`: `DiaryEntryIn`, `DiaryEntryOut`, `FoodMini`.
+- [x] `app/schemas/summary.py`: `MacroBreakdownOut`, `MacrosPercentOut`,
+      `NeedsOut`, `DailyBalanceOut`, `WeekSummaryOut`, con `from_core(...)`.
+- [x] `app/summary/adapter.py`: `build_core_profile`, `entry_to_core_item`,
+      `entries_to_core_items`. Eta' calcolata da `birth_date`.
+- [x] `app/diary/router.py`: POST/GET/DELETE; food visibile = pubblico OR
+      di proprieta'; food non visibile -> 404; DELETE altrui -> 404.
+- [x] `app/summary/router.py`: `/needs`, `/day`, `/week`. Tutti chiamano
+      il motore; 422 con `missing` se profilo incompleto.
+- [x] `app/main.py`: include router diary + summary.
+- [x] `tests/test_diary.py` (11 nuovi): 401 senza token, POST crea,
+      `consumed_at` esplicito, food inesistente -> 404, food personale
+      altrui -> 404, grams<=0 -> 422, meal non valido -> 422, filtro
+      per data, scoping Alice vs Bob, DELETE, DELETE altrui -> 404.
+- [x] `tests/test_summary.py` (8 nuovi): 401, needs senza profilo ->
+      422 missing=weight_kg, needs con profilo -> numeri esatti dal
+      motore, day con voci -> match esatto con `compute_daily_balance`
+      sugli stessi input, day vuoto -> totali zero, day senza
+      profilo -> 422, week 7 giorni con voci distribuite -> totali
+      per giorno corretti, scoping Alice vs Bob.
+- [x] `pytest` verde: 106 passed.
+- [x] Commit di fine fase citando la Fase 6.
+
+### Verifica end-to-end (manuale)
+
+- Smoke test routes: tutte le 8 rotte previste in §9 (auth + foods +
+  diary + summary) registrate dall'app.
