@@ -24,6 +24,15 @@ class Settings(BaseSettings):
         default=30, alias="COACH_RATE_LIMIT_PER_HOUR"
     )
     coach_max_tokens: int = Field(default=1024, alias="COACH_MAX_TOKENS")
+    coach_timeout_seconds: float = Field(
+        default=30.0, alias="COACH_TIMEOUT_SECONDS"
+    )
+    auth_login_rate_limit_per_15min: int = Field(
+        default=10, alias="AUTH_LOGIN_RATE_LIMIT_PER_15MIN"
+    )
+    auth_register_rate_limit_per_15min: int = Field(
+        default=5, alias="AUTH_REGISTER_RATE_LIMIT_PER_15MIN"
+    )
 
 
 def get_settings() -> Settings:

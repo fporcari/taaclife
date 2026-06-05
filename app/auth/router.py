@@ -1,8 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.auth.rate_limit import (
+    enforce_limit,
+    get_login_limiter,
+    get_register_limiter,
+)
+from app.coach.rate_limit import SlidingWindowLimiter
 from app.deps import get_current_user, get_db
 from app.models import User
 from app.schemas.auth import LoginIn, RefreshIn, RegisterIn, TokenPair, UserOut
@@ -21,7 +27,13 @@ INVALID_CREDENTIALS = "credenziali non valide"
 
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterIn, db: Session = Depends(get_db)) -> UserOut:
+def register(
+    payload: RegisterIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    limiter: SlidingWindowLimiter = Depends(get_register_limiter),
+) -> UserOut:
+    enforce_limit(limiter, request)
     user = User(email=payload.email.lower(), password_hash=hash_password(payload.password))
     db.add(user)
     try:
@@ -37,7 +49,13 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)) -> UserOut:
 
 
 @router.post("/login", response_model=TokenPair)
-def login(payload: LoginIn, db: Session = Depends(get_db)) -> TokenPair:
+def login(
+    payload: LoginIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    limiter: SlidingWindowLimiter = Depends(get_login_limiter),
+) -> TokenPair:
+    enforce_limit(limiter, request)
     stmt = select(User).where(User.email == payload.email.lower())
     user = db.execute(stmt).scalar_one_or_none()
     if user is None or not verify_password(payload.password, user.password_hash):
@@ -52,7 +70,13 @@ def login(payload: LoginIn, db: Session = Depends(get_db)) -> TokenPair:
 
 
 @router.post("/refresh", response_model=TokenPair)
-def refresh(payload: RefreshIn, db: Session = Depends(get_db)) -> TokenPair:
+def refresh(
+    payload: RefreshIn,
+    request: Request,
+    db: Session = Depends(get_db),
+    limiter: SlidingWindowLimiter = Depends(get_login_limiter),
+) -> TokenPair:
+    enforce_limit(limiter, request)
     try:
         claims = decode_token(payload.refresh_token, expected_type="refresh")
     except TokenError as exc:

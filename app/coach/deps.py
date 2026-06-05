@@ -38,6 +38,7 @@ def get_coach_client(
             api_key=settings.anthropic_api_key,
             model=settings.coach_model,
             max_tokens=settings.coach_max_tokens,
+            timeout_seconds=settings.coach_timeout_seconds,
         )
     except CoachUnavailableError as exc:
         raise HTTPException(

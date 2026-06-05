@@ -33,13 +33,50 @@ class CoachClient(Protocol):
         ...
 
 
-class AnthropicCoachClient:
-    """Implementazione reale: chiama Anthropic con la chiave di sistema."""
+def _translate_anthropic_error(exc: Exception) -> "CoachUnavailableError":
+    """Mappa un'eccezione del SDK Anthropic in un `CoachUnavailableError`
+    con messaggio NEUTRO. Niente body/headers nei log: solo classe e,
+    se disponibile, lo status code. Mai la chiave."""
+    if isinstance(exc, anthropic.AuthenticationError):
+        logger.warning("coach: errore autenticazione Anthropic")
+        return CoachUnavailableError("coach non disponibile (autenticazione fallita)")
+    if isinstance(exc, anthropic.APITimeoutError):
+        logger.warning("coach: timeout verso Anthropic")
+        return CoachUnavailableError("coach non disponibile (timeout)")
+    if isinstance(exc, anthropic.APIConnectionError):
+        logger.warning("coach: errore di rete verso Anthropic")
+        return CoachUnavailableError("coach non disponibile (rete)")
+    if isinstance(exc, anthropic.RateLimitError):
+        logger.warning("coach: rate limit lato Anthropic")
+        return CoachUnavailableError("coach non disponibile (rate limit upstream)")
+    if isinstance(exc, anthropic.APIStatusError):
+        status_code = getattr(exc, "status_code", "?")
+        logger.warning("coach: API status error status=%s", status_code)
+        return CoachUnavailableError("coach non disponibile (errore upstream)")
+    # APIError generico (catch-all): non logghiamo `exc`, solo la classe.
+    logger.warning("coach: API error (%s)", type(exc).__name__)
+    return CoachUnavailableError("coach non disponibile (errore upstream)")
 
-    def __init__(self, *, api_key: str, model: str, max_tokens: int) -> None:
+
+class AnthropicCoachClient:
+    """Implementazione reale: chiama Anthropic con la chiave di sistema.
+
+    Tutti gli errori del SDK vengono rimappati a `CoachUnavailableError`
+    con messaggi neutri: la chiave non finisce mai in eccezioni propagate
+    ne' nei log (logghiamo solo lo status code, non il body/headers).
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        max_tokens: int,
+        timeout_seconds: float = 30.0,
+    ) -> None:
         if not api_key:
             raise CoachUnavailableError("coach non disponibile (chiave assente)")
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = anthropic.Anthropic(api_key=api_key, timeout=timeout_seconds)
         self._model = model
         self._max_tokens = max_tokens
 
@@ -51,31 +88,15 @@ class AnthropicCoachClient:
                 system=system,
                 messages=messages,
             )
-        except anthropic.AuthenticationError as exc:
-            # Non logghiamo `exc` direttamente: gli headers possono contenere
-            # la chiave. Solo un messaggio neutro.
-            logger.warning("coach: errore autenticazione Anthropic")
-            raise CoachUnavailableError(
-                "coach non disponibile (autenticazione fallita)"
-            ) from None
-        except anthropic.APIConnectionError:
-            logger.warning("coach: errore di rete verso Anthropic")
-            raise CoachUnavailableError(
-                "coach non disponibile (rete)"
-            ) from None
-        except anthropic.RateLimitError:
-            logger.warning("coach: rate limit lato Anthropic")
-            raise CoachUnavailableError(
-                "coach non disponibile (rate limit upstream)"
-            ) from None
-        except anthropic.APIError as exc:
-            # Logghiamo solo lo status code, non il body (potrebbe ripetere
-            # parti della richiesta o headers).
-            status = getattr(exc, "status_code", "?")
-            logger.warning("coach: API error status=%s", status)
-            raise CoachUnavailableError(
-                "coach non disponibile (errore upstream)"
-            ) from None
+        except (
+            anthropic.AuthenticationError,
+            anthropic.APIConnectionError,
+            anthropic.RateLimitError,
+            anthropic.APITimeoutError,
+            anthropic.APIStatusError,
+            anthropic.APIError,
+        ) as exc:
+            raise _translate_anthropic_error(exc) from None
 
         # Estrae il testo concatenando i blocchi text del messaggio.
         chunks: list[str] = []
@@ -96,22 +117,12 @@ class AnthropicCoachClient:
                 messages=messages,
                 tools=tools,
             )
-        except anthropic.AuthenticationError:
-            logger.warning("coach: errore autenticazione Anthropic")
-            raise CoachUnavailableError(
-                "coach non disponibile (autenticazione fallita)"
-            ) from None
-        except anthropic.APIConnectionError:
-            logger.warning("coach: errore di rete verso Anthropic")
-            raise CoachUnavailableError("coach non disponibile (rete)") from None
-        except anthropic.RateLimitError:
-            logger.warning("coach: rate limit lato Anthropic")
-            raise CoachUnavailableError(
-                "coach non disponibile (rate limit upstream)"
-            ) from None
-        except anthropic.APIError as exc:
-            status = getattr(exc, "status_code", "?")
-            logger.warning("coach: API error status=%s", status)
-            raise CoachUnavailableError(
-                "coach non disponibile (errore upstream)"
-            ) from None
+        except (
+            anthropic.AuthenticationError,
+            anthropic.APIConnectionError,
+            anthropic.RateLimitError,
+            anthropic.APITimeoutError,
+            anthropic.APIStatusError,
+            anthropic.APIError,
+        ) as exc:
+            raise _translate_anthropic_error(exc) from None

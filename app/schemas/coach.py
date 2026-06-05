@@ -1,10 +1,17 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("message")
+    @classmethod
+    def _not_whitespace_only(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("messaggio vuoto")
+        return value
 
 
 class ChatOut(BaseModel):

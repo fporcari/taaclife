@@ -11,9 +11,21 @@ from fastapi.testclient import TestClient
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.auth.rate_limit import _login_limiter, _register_limiter
+from app.coach.deps import _build_limiter
 from app.db import Base, build_engine
 from app.deps import get_db
 from app.main import create_app
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiters() -> None:
+    """I limiter sono cached con `lru_cache` per condividerli tra le request
+    dello stesso processo. Nei test questo li fa persistere tra casi
+    consecutivi: azzero la cache a inizio di ogni test."""
+    _login_limiter.cache_clear()
+    _register_limiter.cache_clear()
+    _build_limiter.cache_clear()
 
 
 @pytest.fixture

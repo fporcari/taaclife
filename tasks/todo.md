@@ -742,3 +742,99 @@ Obiettivo (PROJECT.md §8, §12.9): esporre al coach i tool
 - `core.coach_tools.TOOLS` -> 4 tool; tutti gli schema validi.
 - `ToolRunner.run` su utente con profilo+diario funziona per
   tutti e 4 i tool (verificato dai test).
+
+---
+
+## Fase 10 — Hardening
+
+Obiettivo (PROJECT.md §12.10, §8, §3): rate limiting sulle rotte
+sensibili, validazione input robusta, disclaimer medico-legale
+accessibile, gestione errori LLM (timeout, quota, chiave invalida)
+senza far cadere l'app. Audit dei vincoli duri di CLAUDE.md.
+
+### Audit del gia' esistente
+
+- Rate limit LLM per user_id: gia' in F8 (`SlidingWindowLimiter`).
+- Validazione Pydantic: diffusa, ma non uniforme (alcuni body
+  accettano whitespace).
+- Disclaimer: MANCANTE (§3 lo richiede esplicitamente).
+- Errori LLM: in F8 mappati Auth/Connection/RateLimit/APIError.
+  MANCA esplicitamente: `APITimeoutError`, `APIStatusError`.
+- Niente leak chiave: gia' coperto.
+- Scoping per utente: verificato fase per fase. Aggiungo test
+  statico anti-regressione che ispeziona gli schemi Pydantic.
+
+### Decisioni di fase
+
+- Rate limit anti brute-force su `/auth/register`, `/auth/login`,
+  `/auth/refresh`: scoped per **IP** (utente non autenticato),
+  in-memory (stesso `SlidingWindowLimiter` di F8). Configurabile
+  via env. Niente Redis (single-process, self-host).
+- `GET /disclaimer` (pubblico) con il testo italiano di §3.
+- Middleware leggero che aggiunge `X-Medical-Disclaimer:
+  not-a-medical-device; see /disclaimer` su ogni response.
+- `ChatIn.message`: validator che rifiuta whitespace-only.
+- `DiaryEntryIn.consumed_at`: validator di sanity (no piu' di
+  24h nel futuro, no piu' di 5 anni nel passato).
+- `AnthropicCoachClient`: timeout esplicito (30s) sul SDK +
+  mapping `APITimeoutError` -> `CoachUnavailableError("timeout")`.
+  Aggiunta catch generica `APIStatusError`.
+- Sweep statico sui Pydantic Schemas in `app/schemas/`: test che
+  fallisce se uno schema "In" espone `user_id`.
+
+### Vincoli duri rivisti (audit CLAUDE.md)
+
+- "Numeri dal motore": ✓ test di match esatto in summary e tools.
+- "API key solo backend": ✓ test no-leak + nuovi test su timeout
+  e status error che non rivelano la chiave.
+- "Alimenti da crudo": ✓ commenti CSV + docstring + porzioni.
+- "Scoped sull'utente": ✓ nessuno schema "In" espone `user_id`
+  (nuovo test statico).
+- "Tono non giudicante": ✓ test su DailyBalance + system prompt;
+  disclaimer accessibile rafforza il vincolo etico.
+
+### Checklist
+
+- [x] `app/disclaimer.py`: `DISCLAIMER_TEXT_IT` con clausole
+      medico-legali (non e' dispositivo medico, non sostituisce
+      professionista, default mantenimento, riferimento al
+      Numero Verde SOS Disturbi Alimentari).
+- [x] `app/middleware.py`: `MedicalDisclaimerHeaderMiddleware`
+      aggiunge `X-Medical-Disclaimer` a ogni response.
+- [x] `GET /disclaimer` pubblico in `app/main.py`.
+- [x] `app/settings.py`: `auth_login_rate_limit_per_15min` (10),
+      `auth_register_rate_limit_per_15min` (5),
+      `coach_timeout_seconds` (30.0).
+- [x] `app/auth/rate_limit.py`: limiter per IP (login + register
+      separati). `enforce_limit(...)` -> 429 neutro.
+- [x] `app/auth/router.py`: rate limit applicato a register,
+      login, refresh (refresh condivide bucket con login).
+- [x] `app/coach/llm.py`: timeout=30.0 al SDK, mapping unificato
+      di tutti gli errori Anthropic in `_translate_anthropic_error`
+      (Auth, Connection, RateLimit, Timeout, Status, generic).
+      Messaggi sempre neutri, niente chiave nei log.
+- [x] `app/schemas/coach.py`: validator `ChatIn.message` rifiuta
+      whitespace-only (422).
+- [x] `app/schemas/diary.py`: validator `consumed_at` (max 24h
+      nel futuro, max 5 anni nel passato).
+- [x] `tests/conftest.py`: fixture autouse `_reset_rate_limiters`
+      che azzera i bucket tra test (lru_cache).
+- [x] `tests/test_hardening.py` (13 test): disclaimer pubblico
+      + header su rotte protette/non, rate limit register/login/
+      refresh -> 429, chat whitespace -> 422, diary fuori range
+      -> 422, timeout LLM -> 503 neutro senza leak,
+      APIStatusError -> 503 neutro senza leak, integrazione
+      coach con timeout -> 503, sweep AST: nessuno schema "In"
+      espone `user_id`.
+- [x] `pytest` verde: 198 passed.
+- [x] Commit di fine fase + push citando la Fase 10.
+
+### Verifica end-to-end (manuale)
+
+- `GET /disclaimer` -> 200, testo ~1049 char con clausole giuste.
+  (verificato)
+- Header `X-Medical-Disclaimer` presente anche su /health.
+  (verificato)
+- 11 login -> 11° = 429 (test automatico).
+- Sweep statico AST passa: nessuna regressione futura potra'
+  introdurre `user_id` come campo accettato dal client.
