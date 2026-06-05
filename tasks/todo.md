@@ -440,3 +440,76 @@ Tutto scoped sull'utente del token.
 
 - Smoke test routes: tutte le 8 rotte previste in §9 (auth + foods +
   diary + summary) registrate dall'app.
+
+---
+
+## Fase 7 — Pesi + profilo
+
+Obiettivo (PROJECT.md §9, §12.7): rotte `GET/PUT /profile` e `POST/GET
+/weights`. Il profilo separa identita' (`sex` F/M/other) dal parametro di
+calcolo Mifflin (`calc_basis` F/M, §14). `/summary/needs` calcola dal
+profilo via motore (e' gia' wired in F6: in F7 lo rendiamo raggiungibile
+"via API" senza dover popolare via session).
+
+### Decisioni di fase
+
+- `GET /profile`: se non esiste profilo, ritorno scheletro con tutti i
+  campi `None` salvo `goal=MAINTAIN` (default etico §7). Niente 404:
+  evita casi speciali nel client al primo accesso.
+- `PUT /profile`: upsert con campi tutti opzionali. Mai accetta
+  `user_id` dal client (sempre dal token). Lo schema espone
+  `sex` e `calc_basis` come enum DISTINTI:
+  - `sex` accetta {F, M, other};
+  - `calc_basis` accetta solo {F, M} (Mifflin non ha "other").
+  Test che verifica che `calc_basis="other"` -> 422.
+- `Goal` esposto: esattamente {maintain, gentle_loss, gentle_gain}.
+  Nessuna API espone "extreme_loss" o equivalente. Test apposito.
+- `POST /weights`: upsert per giorno. Se esiste gia' un log per
+  `(user_id, measured_at)`, aggiorna `weight_kg` (stesso id). Caso
+  comune: ci si pesa di nuovo e si vuole correggere.
+- `GET /weights`: paginato (limit default 50, max 365), ordine
+  `measured_at` desc.
+- Nessun `DELETE /weights/{id}` in F7 (non richiesto dal goal,
+  non in §9). Aggiungibile in futuro senza rotture.
+
+### Vincoli duri rispettati
+
+- Tutte le rotte scoped: `user_id` solo dal token, mai dal client.
+- `/summary/needs` chiama il motore (gia' fatto in F6); F7 garantisce
+  che ora c'e' una via API per popolare i prerequisiti.
+- Default `goal=MAINTAIN` rispettato come default di prodotto.
+- Niente deficit aggressivo: enum `Goal` ha esattamente 3 valori.
+
+### Checklist
+
+- [x] `app/schemas/profile.py`: `ProfileOut`, `ProfileUpdateIn` (campi
+      opzionali; `sex` Sex enum {F,M,other}, `calc_basis` CalcBasis
+      enum {F,M} — distinti, §14).
+- [x] `app/schemas/weights.py`: `WeightLogIn` (weight_kg>0,
+      measured_at? default oggi), `WeightLogOut`.
+- [x] `app/profile/router.py`: `GET /profile` ritorna scheletro
+      con goal=maintain se non esiste; `PUT /profile` upsert.
+- [x] `app/weights/router.py`: `POST /weights` upsert per giorno;
+      `GET /weights` ordinato desc, paginato (limit max 365).
+- [x] `app/main.py`: include router profile + weights.
+- [x] `tests/test_profile.py` (10): 401, GET scheletro, PUT crea,
+      GET riflette, PUT parziale (semantico: campi non forniti
+      tornano None), `calc_basis="other"` -> 422,
+      `goal="extreme_loss"` -> 422, scoping Alice vs Bob,
+      identita' separata (sex="other" + calc_basis="F" -> ok),
+      height_cm<=0 -> 422, Goal enum esposto = {3 valori etici}.
+- [x] `tests/test_weights.py` (8): 401, POST crea, default
+      measured_at = oggi, upsert stesso giorno (id stabile, valore
+      aggiornato), GET ordinato desc, paginazione, weight_kg<=0 ->
+      422, scoping Alice vs Bob.
+- [x] `tests/test_needs_via_api.py` (3): integrazione end-to-end
+      via API -> caso noto Mifflin donna 30/60/165 moderate maintain
+      -> BMR 1320.25, TDEE 2046.3875; solo peso -> 422 missing
+      height_cm; usa l'ultimo peso per data.
+- [x] `pytest` verde: 127 passed.
+- [x] Commit di fine fase citando la Fase 7.
+
+### Verifica end-to-end (manuale)
+
+- Tutte le rotte di PROJECT.md §9 (eccetto `/coach/*`) registrate:
+  auth, profile, foods, diary, summary, weights. (verificato)
