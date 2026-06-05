@@ -271,3 +271,95 @@ con ricerca + filtro categoria e `POST /foods` per alimenti personali.
 
 - `python -m app.seed` su DB pulito (dopo `alembic upgrade head`) popola
   133 foods e 140 porzioni. Secondo run: skip. (verificato)
+
+---
+
+## Fase 5 — Motore di calcolo
+
+Obiettivo (PROJECT.md §7 e §12.5): `core/nutrition.py` puro, deterministico,
+con Mifflin-St Jeor, TDEE, target per goal, somma diario e `DailyBalance`.
+Test completi su Mifflin uomo/donna, TDEE per ogni livello, somma diario,
+edge case. Requisito etico §7 rispettato.
+
+### Decisioni di fase
+
+- **Confine architetturale**: `core/` non importa da `app/` (sarebbe una
+  dipendenza inversa). `core/nutrition.py` definisce le sue dataclass e
+  i suoi enum. L'adapter "modello DB → dataclass core" verra' alle fasi
+  successive (6/7/8). I valori string degli enum coincidono con quelli
+  di `app/models.py` (test apposito).
+- **Solo standard library**: `dataclasses`, `enum`, `math`. Nessun
+  `sqlalchemy`, `fastapi`, `httpx`, `anthropic`, `app.*`. Test
+  introspettivo via AST.
+- **Tipi pubblici**: `Sex`, `ActivityLevel`, `Goal`, `Profile`,
+  `FoodNutrients`, `DiaryItem`, `MacroBreakdown`, `Needs`, `DailyBalance`.
+- **Eccezione `ProfileIncompleteError`**: alzata quando manca un dato
+  necessario al calcolo (peso, altezza, eta'). MAI ritornare un numero
+  finto (vincolo §2 "se manca un dato, dice che manca").
+- **Goal default `MAINTAIN`** (requisito etico §7).
+  `GENTLE_LOSS` = TDEE × 0.85 (max -15%, limite superiore del range
+  "10-15%" — esposto come singola scelta moderata).
+  `GENTLE_GAIN` = TDEE × 1.10.
+  Niente parametro libero `deficit_pct`; niente `EXTREME_LOSS`.
+- **`calc_basis` mancante**: §14 -> media delle due formule, con
+  `Needs.calc_basis_assumed=True` per dichiarare l'assunzione.
+- **`activity_level` mancante**: fallback `SEDENTARY` (piu' conservativo)
+  con `Needs.activity_assumed=True`.
+- **`goal` mancante**: `MAINTAIN` (e' il default di prodotto, non
+  un'assunzione: niente flag).
+- **Diario vuoto**: totali a zero. Non e' un errore, e' un fatto.
+- **Fibre `None`** in un food: tratte come 0 nella somma; documento
+  questa scelta nel docstring.
+- **Niente giudizi nel dato grezzo**: `DailyBalance` ha numeri e
+  differenza grezza (segnata), nessun campo "status" o "label".
+
+### Vincoli duri rispettati
+
+- "I numeri li fa il motore": tutto qui dentro, deterministico.
+- "Se manca un dato, dice che manca": `ProfileIncompleteError`,
+  oppure flag `*_assumed=True` per assunzioni dichiarate.
+- "Default mantenimento, niente deficit aggressivo": API non lo permette.
+- "Niente giudizi nel dato grezzo": test che verifica i campi.
+- `core/` non tocca DB ne' rete ne' LLM: test AST sui moduli importati.
+
+### Checklist
+
+- [x] `core/nutrition.py`: enum (Sex, ActivityLevel, Goal),
+      dataclass (Profile, FoodNutrients, DiaryItem, MacroBreakdown,
+      Needs, MacrosPercent, DailyBalance), funzioni pure
+      (compute_bmr, compute_tdee, compute_needs,
+       compute_item_nutrients, sum_items, compute_daily_balance),
+      eccezione `ProfileIncompleteError`.
+- [x] `tests/test_nutrition.py`:
+      - Mifflin uomo 30/75/180 -> 1730 (calcolato a mano);
+      - Mifflin donna 30/60/165 -> 1320.25 (calcolato a mano);
+      - Mifflin altri due casi noti (uomo 25/80/180 -> 1805,
+        donna 25/65/170 -> 1426.5);
+      - TDEE per ogni livello (5 parametri);
+      - target per ogni goal (3 casi) + default MAINTAIN se goal None;
+      - GENTLE_LOSS -15% (×0.85), GENTLE_GAIN +10% (×1.10) esatti;
+      - `compute_item_nutrients` con grammature 0/50/80/100/150/250;
+      - `sum_items` con mix di alimenti, fibre None come 0;
+      - `compute_daily_balance` sotto/uguale/sopra target;
+      - macros_percent con caso noto (solo proteine -> 100% prot);
+      - `ProfileIncompleteError` per peso/altezza/eta' mancanti;
+      - `calc_basis=None` -> media F/M, `assumed=True`;
+      - `activity_level=None` -> SEDENTARY, `assumed=True`;
+      - test "purezza": AST verifica che core/nutrition.py non
+        importi sqlalchemy/alembic/fastapi/pydantic/httpx/anthropic/app;
+      - test "no giudizi": fields di DailyBalance non contengono
+        nomi tipo status/label/good/bad/over/under;
+      - test "no deficit aggressivo": Goal ha esattamente
+        {MAINTAIN, GENTLE_LOSS, GENTLE_GAIN}, fattori entro -15%/+10%;
+      - test "compatibilita' enum": valori string di
+        Sex/ActivityLevel/Goal di core coincidono con quelli
+        di app.models (CalcBasis/ActivityLevel/Goal).
+- [x] `pytest` verde: 87 passed.
+- [x] End-to-end REPL: caso donna 35/65/168 moderata -> TDEE 2114.2,
+      diario plausibile -> bilancio coerente.
+- [x] Commit di fine fase citando la Fase 5.
+
+### Verifica end-to-end (manuale)
+
+- Importare `core.nutrition` e calcolare un caso noto in REPL:
+  donna 35/65/168 moderata -> TDEE 2114.2; verificato.
