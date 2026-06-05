@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}NutriCoach — {{ "entra" if mode == "login" else "registrati" }}{% endblock %}
+
+{% block body %}
+<div class="auth">
+  <section class="auth-poster">
+    <a href="/" style="color: inherit; text-decoration: none">
+      <div class="brand-mark" style="font-size: 1.6rem">Nutri<em style="color: #E0A678">Coach</em></div>
+      <span class="brand-tagline" style="color: rgba(245, 240, 230, 0.6)">il quaderno alimentare</span>
+    </a>
+
+    <div>
+      <h1>Un diario, <em>non un voto</em>.</h1>
+      <p class="pull" style="margin-top: 2rem">
+        NutriCoach tiene traccia di cosa mangi e ti aiuta a leggerlo, senza
+        giudizi e senza inventare numeri. Il riferimento di partenza è il
+        mantenimento; le calorie le puoi nascondere quando vuoi.
+      </p>
+    </div>
+
+    <div style="font-family: var(--mono); font-size: 0.65rem; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(245, 240, 230, 0.5)">
+      v. 0.1 — self-host · open source
+    </div>
+  </section>
+
+  <section class="auth-form">
+    {% if mode == "register" %}
+      <h2>Crea un account</h2>
+      <p class="lede">Bastano un'email e una password (minimo 8 caratteri).</p>
+    {% else %}
+      <h2>Bentornato.</h2>
+      <p class="lede">Inserisci email e password per riprendere il tuo quaderno.</p>
+    {% endif %}
+
+    <form id="auth-form" autocomplete="on">
+      <div class="err"></div>
+      <div class="field">
+        <label for="email">Email</label>
+        <input class="input" id="email" name="email" type="email" required autocomplete="email">
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input class="input" id="password" name="password" type="password" required minlength="8" autocomplete="{{ 'new-password' if mode == 'register' else 'current-password' }}">
+      </div>
+      <button class="btn" type="submit">
+        {{ "Crea account" if mode == "register" else "Entra" }}
+      </button>
+      <p class="switch">
+        {% if mode == "register" %}
+          Hai già un account? <a href="/login">entra</a>.
+        {% else %}
+          Nuovo qui? <a href="/register">registrati</a>.
+        {% endif %}
+      </p>
+    </form>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>bootstrapAuth("{{ mode }}");</script>
+{% endblock %}

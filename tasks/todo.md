@@ -838,3 +838,91 @@ senza far cadere l'app. Audit dei vincoli duri di CLAUDE.md.
 - 11 login -> 11° = 429 (test automatico).
 - Sweep statico AST passa: nessuna regressione futura potra'
   introdurre `user_id` come campo accettato dal client.
+
+---
+
+## Fase 11 — Frontend
+
+Obiettivo (PROJECT.md §11): UI che consuma le API esistenti con
+sezioni diario, gusti, andamento peso, chat coach. Tono coerente
+col requisito etico §7 (niente colpa, possibilita' di nascondere
+le calorie).
+
+### Direzione di design
+
+- Stile: **editorial / quotidiano colto**. Niente dashboard
+  sportivo, niente progress bar che insinuano colpa.
+- Stack: HTML + HTMX (PROJECT.md §11 "ordine di leggerezza"),
+  serviti direttamente da FastAPI via Jinja2 + StaticFiles.
+  Niente npm/bundler.
+- Font: Fraunces (display serif) + Newsreader (body serif) +
+  JetBrains Mono (numeri tabulari). Da Google Fonts.
+- Palette: carta avorio + inchiostro caldo + un solo accento
+  terra di Siena.
+- Toggle "nascondi calorie" persistito in localStorage:
+  l'embodiment del §7. Nasconde kcal mantenendo macro/voci.
+
+### Decisioni di fase
+
+- Aggiungo rotte `/preferences` API (PROJECT.md §5 ha la tabella,
+  serve per la sezione gusti):
+  - `GET /preferences` -> {liked:[], avoided:[]}
+  - `POST /preferences` -> aggiunge un item
+  - `DELETE /preferences/{id}` -> rimuove
+- Frontend in `app/web/`:
+  - `app/web/router.py`: rotte HTML che renderizzano i
+    template Jinja. Servono /, /login, /register, /onboarding
+    pubbliche; le altre richiedono token (gestito client-side
+    con redirect a /login se manca).
+  - `app/templates/`: base.html + sezioni.
+  - `app/static/`: CSS + un piccolo JS per HTMX hooks (token
+    in Authorization header) e toggle calorie.
+- Auth via JWT salvato in localStorage. Hook
+  `htmx:configRequest` aggiunge Authorization. 401 -> redirect.
+- Pagina principale = SPA leggera: layout fisso + main area
+  che cambia via HTMX swap (no full reload).
+- Disclaimer in footer fisso con link a /disclaimer.
+
+### Pezzi (paralleli dove possibile)
+
+- [x] Setup Jinja2 + StaticFiles + `jinja2==3.1.5` aggiunta a
+      requirements.
+- [x] `/preferences` API (GET, POST, DELETE) con scoping e
+      test (7 nuovi: 401, vuoto, add liked+avoided, 409 su
+      duplicato, delete, delete altrui 404, scoping Alice/Bob).
+- [x] `app/web/router.py` con rotte /, /login, /register
+      (HTMLResponse, niente JWT lato server: gestito dal JS
+      con redirect 401).
+- [x] `app/templates/base.html` + `shell.html` + `auth.html`:
+      layout editorial con sidebar fissa (sezioni + toggle
+      nascondi calorie + logout), main area lazy-loaded.
+- [x] `app/static/app.css` (542 righe): palette carta avorio
+      + inchiostro + accento terra di Siena; tipografia Fraunces
+      (display) + Newsreader (body) + JetBrains Mono (numeri);
+      texture noise SVG inline, animazioni rise per ingresso,
+      hide-calories CSS che maschera kcal con ··· senza nascondere
+      le voci.
+- [x] `app/static/app.js`: token JWT in localStorage, helper
+      `api()` con redirect 401, bootstrap shell/auth, navigazione
+      tra sezioni con hash routing.
+- [x] `app/static/sections/oggi.js`: bilancio kcal + macros con
+      % (4-4-9), voci di diario con tempo e rimozione, form
+      aggiunta con search inline alimenti.
+- [x] `app/static/sections/gusti.js`: chips liked/avoided con
+      due form di aggiunta separati; "non sono un giudizio".
+- [x] `app/static/sections/peso.js`: lista cronologica + sparkline
+      SVG inline (path+area+dots+axis), form di registrazione.
+- [x] `app/static/sections/coach.js`: chat con history,
+      auto-resize textarea, invio con enter, placeholder
+      "sto leggendo i tuoi dati…", segnalazione `needs_missing`.
+- [x] Toggle nascondi calorie: classe `hide-calories` su body,
+      CSS maschera i numeri con "···" mantenendo struttura.
+- [x] Test: 13 nuovi (7 preferences + 6 web). Pytest verde: 211.
+- [x] Commit + push citando la Fase 11.
+
+### Verifica end-to-end (manuale)
+
+- Aprire http://localhost:8000/ dopo `uvicorn app.main:app`:
+  vedo la home/login; faccio register+login; navigo le 4 sezioni;
+  toggle nascondi calorie funziona; chat coach risponde (con
+  chiave Anthropic in .env).
