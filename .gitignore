@@ -41,3 +41,7 @@ htmlcov/
 
 # Script di smoke test locali (non committati)
 scripts/
+
+# Output autogenerato di build.sh (committabile ma di solito locale)
+build.config
+.tmp_test_stubs/
