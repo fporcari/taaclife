@@ -1,7 +1,0 @@
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-ra --strict-markers"
-filterwarnings = [
-    "error",
-    "ignore::DeprecationWarning:passlib.*",
-]

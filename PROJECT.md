@@ -1,441 +1,623 @@
-# Proto-progetto: NutriCoach (nome di lavoro)
+# NutriCoach v3 — proto-progetto (browser-native)
 
-Documento di partenza per implementazione con Claude Code. Descrive cosa
-costruire, con quali vincoli e in quale ordine. Non è codice: è il contratto
-che il codice deve rispettare.
+Documento di partenza per la **terza** prospettiva del prodotto. Le due
+versioni precedenti (`/PROJECT.md` v1 server-side diario-centrico, e
+`taac2/PROJECT.md` v2 server-side chat-centrico) sono state archiviate
+come riferimento. Questa è la versione corrente.
 
 ---
 
-## 1. Obiettivo in una frase
+## 1. Frase di partenza
 
-Web app multi-utente che tiene un diario alimentare basato su un database di
-alimenti, calcola in modo deterministico fabbisogni e bilanci, e usa un LLM
-(Claude API) come interfaccia conversazionale per spiegare, suggerire e
-rispondere in linguaggio naturale, senza mai inventare numeri.
+NutriCoach è una **PWA browser-native, single-user per dispositivo, senza
+backend**. È un layer di contesto sulla chat con un assistente di
+nutrizione: dà persistenza alla situazione (chi sei, cosa ti piace, cosa
+hai mangiato, che piano segui) e alla sua evoluzione (come cambia nel
+tempo). La chat è l'interfaccia; un SQLite locale nel browser è la
+memoria del rapporto coach-utente.
 
-## 2. Principio architetturale non negoziabile
+## 2. Il vincolo che decide tutto: niente fornitori
 
-**I numeri li fa il motore di calcolo. L'LLM parla.**
+L'utente non vuole dipendere da nessun fornitore di servizi (incluso me
+che scrivo il codice). I dati personali e la chiave Anthropic devono
+**stare solo sul dispositivo dell'utente**. Niente hosting di un backend,
+niente database in cloud, niente "fidati di chi ospita".
 
-- Calorie, macro, fabbisogno, bilancio giornaliero: calcolati da codice Python
-  deterministico e testabile. Mai chiesti all'LLM.
-- L'LLM riceve i numeri già calcolati come contesto e li spiega, commenta,
-  suggerisce. Non somma, non stima porzioni a mente, non deduce calorie.
-- Ogni risposta dell'LLM che contiene un numero deve poter essere ricondotta a
-  un valore prodotto dal motore. Se il dato non c'è, l'LLM lo dice, non lo
-  inventa.
+Conseguenze architetturali, tutte derivate da questo vincolo:
 
-Questa separazione è la ragione per cui l'app è affidabile invece di essere un
-chatbot che allucina. Va difesa in ogni fase.
+- **Zero server**: nessun FastAPI, nessun Hetzner, nessun Docker. L'app
+  è un bundle di file statici (HTML+JS+WASM+CSS).
+- **SQLite-WASM nel browser** con persistenza in OPFS (Origin Private
+  File System). Il database `.db` vive nel filesystem privato del
+  browser dell'utente.
+- **Chiave Anthropic in `localStorage`** del browser, mai trasmessa
+  altrove se non direttamente a `api.anthropic.com`.
+- **Chiamate Anthropic dirette dal browser**. Anthropic accetta
+  questo caso d'uso con il flag `dangerouslyAllowBrowser: true` del
+  SDK ufficiale: è "pericoloso" per un fornitore SaaS che esporrebbe
+  la sua chiave ai browser dei clienti, ma per noi è **sicuro perché
+  la chiave è dell'utente stesso**. Non c'è nessuno a cui rubarla che
+  non sia l'utente.
+- **Multi-utente = multi-browser/dispositivo**. Ogni browser ha il suo
+  database. Te e tua moglie aprite lo stesso URL ma vedete dati
+  diversi perché ognuno è nel proprio OPFS. Niente login,
+  niente account, niente confusione.
+- **Niente autenticazione tradizionale.** Senza server non c'è nessuno
+  a cui presentare credenziali, e non c'è nessuna ragione per averle.
+  L'unica protezione che ha senso è un **blocco locale opzionale** —
+  vedi §11bis.
+- **Hosting**: Netlify (statico, gratis, HTTPS automatico). L'app vive
+  su un URL pubblico ma i dati non escono mai dal browser.
 
-## 3. Disclaimer obbligatorio
+## 3. Layer di contesto sulla chat
 
-L'app non è un dispositivo medico e non sostituisce un nutrizionista o un
-medico. Va mostrato un disclaimer all'onboarding e reso accessibile sempre.
-Nessun linguaggio diagnostico o prescrittivo. Tono di supporto, non di giudizio:
-niente "cibi buoni/cattivi", niente sensi di colpa, niente celebrazione del
-deficit calorico fine a se stesso.
+Definizione di prodotto:
 
-## 4. Stack tecnico
+> NutriCoach è un layer di contesto sulla chat: dà persistenza alla
+> situazione e alla sua evoluzione. La chat è l'interfaccia; il DB è
+> la memoria del rapporto coach-utente.
 
-| Livello   | Scelta                                              |
-|-----------|-----------------------------------------------------|
-| Backend   | FastAPI (Python 3.12)                               |
-| DB        | SQLite (file su volume), WAL mode attivo            |
-| ORM       | SQLAlchemy 2.x + Alembic per le migrazioni          |
-| Auth      | JWT (access + refresh), password con bcrypt/argon2  |
-| LLM       | Anthropic API (Claude), SDK ufficiale               |
-| Frontend  | da decidere in fase 2 (vedi §11). API-first.        |
-| Container | Docker (immagine singola)                           |
-| Hosting   | macchina personale del committente (self-host)      |
-| Test      | pytest                                              |
+Implicazione: ogni tabella del modello dati (profilo, gusti, pesi,
+percorsi, voci diario) è un pezzo del "layer di contesto". L'LLM senza
+queste tabelle è un chatbot generico; con queste tabelle è un coach
+che ti conosce.
 
-Motivazione: side project leggero. SQLite è adatto al profilo d'uso (diario
-alimentare: molte letture, scritture sporadiche e singole). Multi-utente qui
-significa account con dati separati, non alta concorrenza in scrittura, quindi
-SQLite regge senza problemi. WAL mode permette letture e scritture concorrenti.
-FastAPI dà OpenAPI gratis e tipizzazione Pydantic, utile a tenere onesto il
-confine tra motore di calcolo e LLM.
+A ogni nuovo turno della chat, l'app:
+1. legge dal DB locale lo stato corrente (profilo + gusti +
+   constraints + ultimo peso + percorsi salvati + ultime voci di
+   diario);
+2. costruisce un blocco JSON di contesto da iniettare nel prompt;
+3. chiama Claude con la chiave dell'utente, system prompt del
+   contratto §6, e i tool;
+4. interpreta la risposta e **persiste subito nel DB** ogni dato
+   significativo che l'utente ha confermato in chat (peso, altezza,
+   gusti, piani settimanali).
 
-Grazie a SQLAlchemy il codice resta indipendente dal motore: se un domani serve
-più concorrenza (molti writer simultanei, o API scalata su più processi), si
-migra a Postgres cambiando solo la `DATABASE_URL`, senza riscrivere le query.
+Lo storico chat resta in tabella `chat_messages` come traccia
+narrativa, ma è il DB strutturato che dà al coach il contesto
+persistente, non il riassunto della chat.
 
-## 5. Modello dati (prima bozza)
+## 4. Onboarding conversazionale (l'esperienza primaria)
+
+L'utente apre l'app, mette la chiave Claude in Impostazioni, e da quel
+momento parla con il nutrizionista AI. Niente form di profilo, niente
+"compila prima". La prima chat **è** l'onboarding:
+
+- il coach si presenta (con disclaimer di partenza, §5),
+- chiede peso, altezza, età, attività;
+- calcola e mostra **BMI** (numero neutro, niente categorie
+  "sottopeso/normopeso");
+- chiede gusti (liked, avoided) e vincoli (es. "vegetariana",
+  "poco tempo la sera");
+- propone un primo **piano settimanale** sui gusti dell'utente,
+  verificato dal motore;
+- salva tutto nel DB (profile, preferences, weight_log, path).
+
+Da lì in avanti l'app sa chi è l'utente. Le chat successive ereditano
+il contesto. "Voglio variare il martedì sera" diventa: il coach carica
+l'ultimo path attivo dal DB, modifica solo quel pasto, fa verificare al
+motore, salva una **nuova versione** del path (non sovrascrive — la
+storia si conserva).
+
+## 5. Disclaimer
+
+L'app **non è un dispositivo medico** e **non sostituisce un
+nutrizionista o un medico**. Disclaimer mostrato:
+
+- al primo avvio (modale di onboarding non skippabile),
+- sempre accessibile da Impostazioni,
+- presente nel system prompt del coach.
+
+Tono di supporto, mai diagnostico. I percorsi sono suggerimenti di
+benessere, non prescrizioni dietetiche.
+
+In più, per scelta di prodotto (uso personale dell'utente proprietario):
+- niente categorizzazione del BMI ("sottopeso/normopeso/sovrappeso");
+- niente celebrazione del deficit calorico;
+- l'utente può nascondere le calorie dall'UI in qualsiasi momento.
+
+## 6. Principio architetturale: l'LLM propone, il motore verifica
+
+Il ruolo dell'LLM e del motore sono separati:
+
+- **L'LLM genera e racconta**: costruisce i percorsi alimentari sui
+  gusti dell'utente, dialoga, spiega, adatta. È la parte creativa e
+  relazionale.
+- **Il motore verifica**: `engine/nutrition.ts` (TypeScript puro,
+  testabile), valida i conti di un percorso proposto contro il
+  database alimenti e il fabbisogno stimato.
+- **Numeri mostrati come fatti certi vengono dal motore o dal database
+  alimenti**, non inventati dall'LLM. Quando l'LLM propone un percorso,
+  i valori nutrizionali si ricavano dal database; il motore somma e
+  confronta. Se un alimento non è in database, l'LLM lo segnala come
+  stima, non come dato.
+
+L'LLM ha libertà creativa sui *percorsi e sul dialogo*, ma i *numeri*
+restano ancorati a database + motore.
+
+## 7. Stack tecnico
+
+| Livello             | Scelta                                                           |
+|---------------------|------------------------------------------------------------------|
+| Linguaggio          | TypeScript (strict mode)                                         |
+| Framework UI        | SvelteKit (mode SPA, adapter-static)                             |
+| Database (locale)   | SQLite via sqlite-wasm ufficiale + OPFS                          |
+| Query layer         | sql.js wrapper sottile / Kysely (se serve type-safety)           |
+| LLM SDK             | `@anthropic-ai/sdk` con `dangerouslyAllowBrowser: true`         |
+| Stile               | CSS vanilla + variabili. Niente Tailwind (PWA leggera)           |
+| Test                | Vitest (unit) + Playwright (e2e/PWA)                             |
+| Build               | Vite (via SvelteKit)                                             |
+| Hosting             | Netlify (statico, HTTPS, deploy via git push)                    |
+| Mobile              | PWA installabile (manifest + service worker)                     |
+
+Note di scelta:
+
+- **SvelteKit modalità statica**: l'app è un bundle prerenderizzato.
+  Zero server. Configurazione `adapter-static` con `fallback: 'index.html'`
+  perché è una SPA con routing client-side.
+- **sqlite-wasm + OPFS**: il binario WASM è ~1MB, caricato una volta.
+  OPFS è uno standard moderno (Chrome 102+, Safari 17.4+, Firefox 111+).
+  Niente IndexedDB hacky.
+- **Niente Tailwind, niente UI library**: PWA leggera e veloce. CSS
+  vanilla con variabili e un design system minimale.
+- **Mobile-first**: il layout è pensato per il telefono. Scale fluida
+  su desktop, niente layout drasticamente diverso.
+
+## 8. Modello dati (SQLite locale)
 
 ```
-users
-  id (uuid, pk)
-  email (unique)
-  password_hash
-  created_at
+users                              # in pratica c'è una sola riga: l'utente
+  id (integer pk)                   # del browser. Tabella tenuta per ordine
+  display_name (text)               # e per supportare future estensioni.
+  created_at (datetime)
 
-profiles                      # dati per il calcolo del fabbisogno
-  user_id (fk users, unique)
-  sex            # 'F' | 'M' | 'other' -> per Mifflin si usa F/M, gestire 'other'
-  birth_date
-  height_cm
-  activity_level # enum: sedentary, light, moderate, active, very_active
-  goal           # enum: maintain, gentle_loss, gentle_gain  (vedi nota etica §7)
-  updated_at
+settings                            # chiave-valore semplice
+  key (text pk)
+  value (text)
+  -- es. 'anthropic_api_key', 'coach_model', 'hide_calories' (bool stringato)
+
+profile                             # un profilo per database (single-user)
+  id (integer pk)                   # sempre 1, vincolo CHECK
+  calc_basis (text)                 # 'F' | 'M' (parametro Mifflin)
+  birth_date (date)
+  height_cm (real)
+  activity_level (text)             # sedentary/light/moderate/active/very_active
+  goal (text)                       # feel_good (default) | maintain | gentle_loss | gentle_gain
+  updated_at (datetime)
+
+preferences_liked                   # lista cibi/piatti graditi
+  id (integer pk)
+  value (text not null)
+  created_at (datetime)
+
+preferences_avoided                 # lista cibi/piatti evitati
+  id (integer pk)
+  value (text not null)
+  reason (text)                     # opzionale: "allergia", "non mi piace"
+  created_at (datetime)
+
+constraints                         # note libere di contesto (1 riga di solito)
+  id (integer pk)
+  text (text)                       # "vegetariana, palestra mar/gio, poco tempo la sera"
+  updated_at (datetime)
 
 weight_logs
-  id (pk)
-  user_id (fk)
-  measured_at (date)
-  weight_kg
+  id (integer pk)
+  measured_at (date not null)
+  weight_kg (real not null)
+  unique (measured_at)
 
-foods                         # il database alimenti (vedi §6)
-  id (pk)
-  name
-  category
-  kcal_100g
-  protein_100g
-  carbs_100g
-  fat_100g
-  fiber_100g (nullable)
-  source         # 'CREA' | 'user' | 'off'
-  is_public (bool)            # alimenti di sistema vs creati dall'utente
-  created_by (fk users, nullable)
+foods                               # database alimenti (CREA + personali)
+  id (integer pk)
+  name (text not null)
+  category (text)
+  kcal_100g (real not null)
+  protein_100g (real not null)
+  carbs_100g (real not null)
+  fat_100g (real not null)
+  fiber_100g (real)
+  source (text)                     # 'CREA' | 'user'
 
-portions                      # porzioni di riferimento per alimento
-  id (pk)
-  food_id (fk)
-  label          # es. "un piatto", "una fetta"
-  grams
+portions                            # porzioni di riferimento per alimento
+  id (integer pk)
+  food_id (fk foods)
+  label (text)                      # "80 g di pasta cruda"
+  grams (real not null)
 
-diary_entries
-  id (pk)
-  user_id (fk)
-  consumed_at (timestamp)
-  meal           # enum: breakfast, lunch, dinner, snack
-  food_id (fk)
-  grams          # quantità effettiva consumata
-  -- kcal/macro NON si salvano qui: si calcolano da food + grams.
-  -- (eventuale cache denormalizzata solo se serve per performance)
+paths                               # i percorsi alimentari generati
+  id (integer pk)
+  created_at (datetime)
+  title (text not null)
+  summary (text)                    # descrizione narrativa
+  content (text not null)           # JSON dei pasti/giorni/porzioni
+  verified (integer)                # 0/1
+  verify_notes (text)
+  parent_id (fk paths)              # versioning: questa è una variazione di X
+  active (integer)                  # 0/1, il path "in uso" è active=1
 
-preferences                   # i "gusti" dell'app precedente, se si vogliono tenere
-  user_id (fk)
-  liked   (text[] o tabella a parte)
-  avoided (text[])
+diary_entries                       # opzionale, materiale per il dialogo
+  id (integer pk)
+  consumed_at (datetime not null)
+  meal (text)                       # breakfast/lunch/dinner/snack
+  food_id (fk foods)
+  free_text (text)                  # "una pizza con gli amici" senza per forza il DB
+  grams (real)
+  -- CHECK (food_id IS NOT NULL AND grams > 0) OR free_text IS NOT NULL
 
-chat_messages                 # storico conversazione con l'LLM
-  id (pk)
-  user_id (fk)
-  role           # 'user' | 'assistant'
-  content
-  created_at
+chat_messages                       # storico narrativo della chat
+  id (integer pk)
+  role (text)                       # 'user' | 'assistant' | 'system_event'
+  content (text not null)
+  created_at (datetime)
+
+schema_version                      # per migrazioni future
+  version (integer pk)
+  applied_at (datetime)
 ```
 
-Nota: tenere `diary_entries` snello e calcolare i totali al volo o in una vista.
-Denormalizzare solo se un profiling mostra che serve.
+Nota: il vincolo "single-user per database" è tenuto a livello
+applicativo (CHECK sui PK + UI che non espone "switch user"). Il
+multi-utente è il multi-browser.
 
-## 6. Database alimenti
+## 9. Database alimenti
 
 ### Fonte
-Tabelle di composizione degli alimenti **CREA** (ex-INRAN), valori per 100 g di
-parte edibile. Sono lo standard italiano di riferimento. In alternativa o in
-aggiunta, **Open Food Facts** per prodotti confezionati (ha API e dump, licenza
-ODbL — verificare requisiti di attribuzione prima di redistribuire).
+Tabelle di composizione degli alimenti CREA (ex-INRAN), valori per 100 g
+di parte edibile. Seed iniziale di ~100 alimenti italiani comuni
+incorporato nel bundle JS (file `seed/foods.json` generato dal CSV).
 
 ### Strategia
-- Partire con un seed curato di ~80-120 alimenti italiani comuni (pasta, riso,
-  pane, pollo, uova, legumi, verdure, frutta, latticini, oli) come file
-  `seed/foods.csv` versionato nel repo.
-- I valori per 100 g sono dati di composizione di pubblico dominio; la CSV di
-  seed va comunque corredata da una nota sulla fonte.
-- Migrazione Alembic che crea le tabelle + script di seed idempotente che
-  popola `foods` e `portions` solo se vuote.
-- Lasciare predisposto un importer per dump CREA/OFF più ampi in fase 2.
+- Al primo avvio, se la tabella `foods` è vuota, l'app legge il JSON
+  embed e popola SQLite.
+- L'utente può aggiungere alimenti personali (`source='user'`) da UI o
+  via chat ("aggiungi 'tortino della nonna': 250 kcal, 5g proteine..."
+  → il coach chiama un tool `add_food` con conferma).
 
-### Attenzione (mettere come commento nel seed)
-- Valori "crudo" vs "cotto" sono diversi: la pasta cruda ~350 kcal/100g, da
-  cotta pesa ~2x con meno densità calorica. Decidere una convenzione (consiglio:
-  registrare il peso da crudo dove ha senso, con porzioni etichettate) e
-  documentarla, altrimenti i totali sono fuori di un fattore 2.
+### Convenzione crudo/cotto
+Valori per 100 g di alimento **da crudo / a peso secco**. Le porzioni
+etichettate di conseguenza ("80 g di pasta cruda"). Sbagliarla raddoppia
+i conti. Documentato nel commento del JSON di seed e nel system prompt.
 
-## 7. Motore di calcolo (deterministico)
+## 10. Motore di calcolo (verificatore deterministico)
 
-Modulo `core/nutrition.py`, puro, senza dipendenze da DB o LLM, interamente
-testato con pytest.
+Modulo `engine/nutrition.ts`, puro (niente DB direct, niente rete, niente
+LLM). Riceve in ingresso dati e database alimenti come argomento.
 
-### Fabbisogno energetico
-- **BMR** con **Mifflin-St Jeor**:
-  - Uomo: `10*kg + 6.25*cm - 5*età + 5`
-  - Donna: `10*kg + 6.25*cm - 5*età - 161`
-- **TDEE** = BMR × fattore attività:
-  - sedentary 1.2, light 1.375, moderate 1.55, active 1.725, very_active 1.9
-- Obiettivo: maintain = TDEE; gentle_loss = TDEE − ~10-15%;
-  gentle_gain = TDEE + ~10%.
+### Funzioni di calcolo (formule da PROJECT v2 §9)
+- **BMR** Mifflin-St Jeor (base M / F).
+- **TDEE** = BMR × fattore attività (1.2 / 1.375 / 1.55 / 1.725 / 1.9).
+- **BMI** = peso / (altezza_m)². Numero neutro, niente categoria.
+- **Fabbisogno** secondo il goal: `feel_good` ≈ TDEE,
+  `maintain` ≈ TDEE, `gentle_loss` TDEE × 0.85, `gentle_gain` TDEE × 1.10.
 
-### Nota etica sul "goal" (importante, leggere)
-Il brief originale di questo progetto era "non deve dimagrire, vuole sentirsi
-bene". Tenere quindi:
-- Default su `maintain`, non su perdita di peso.
-- Niente obiettivi aggressivi: il deficit massimo selezionabile resta moderato.
-- Nessuna gamification del deficit (niente streak di "giorni sotto soglia").
-- Possibilità di nascondere del tutto le calorie e usare l'app solo come diario
-  + dialogo, per chi conta le calorie sta peggio.
-Questa non è una richiesta cosmetica: è un requisito di prodotto.
+### Verifica di un percorso
+Data la struttura di un percorso proposto dall'LLM (giorni, pasti,
+alimenti con grammature), il motore:
+- somma kcal e macro usando i valori del database (passati come arg);
+- confronta col fabbisogno stimato;
+- ritorna `VerifyResult { verified: boolean, totals, notes }` con note
+  neutre.
 
-### Bilancio giornaliero
-- Dato un giorno: somma kcal e macro dalle `diary_entries` (food × grams / 100).
-- Confronto con il fabbisogno: produce un oggetto `DailyBalance` con totali,
-  target, differenza, ripartizione macro. Niente giudizi nel dato grezzo.
+### Test
+Vitest. Mifflin M/F su casi noti, TDEE per ogni livello, BMI, verifica
+percorso con totali noti, edge case (profilo incompleto, alimento fuori
+DB → dichiarato come stima nelle note).
 
-### Test minimi
-- Mifflin uomo/donna con casi noti.
-- TDEE per ogni livello attività.
-- Somma diario con porzioni e grammature varie.
-- Edge case: profilo incompleto, età mancante, peso assente.
+## 11. Layer LLM (l'assistente)
 
-## 8. Layer LLM (il "nutrizionista che dialoga")
+Modulo `app/coach/` (TypeScript). È il cuore conversazionale.
 
-Modulo `core/coach.py`. È la chat: l'utente scrive in linguaggio naturale, e
-Claude risponde **sui dati reali di quell'utente**, non in astratto.
+### Chiave
+La chiave Anthropic dell'utente, presa da `settings` in SQLite, viene
+caricata in memoria a inizio sessione del browser. Mai loggata, mai
+mandata altrove se non a `api.anthropic.com`.
 
-### Chiave Claude
-Una sola chiave di sistema, in `.env` come `ANTHROPIC_API_KEY`, fornita
-dall'amministratore (il committente). Gli utenti non inseriscono chiavi: usano
-tutti la chiave dell'istanza. Conseguenze da gestire:
-- La chiave sta **solo nel backend**, mai inviata al frontend né visibile via
-  API. Il client parla con `/coach/chat`, non con Anthropic.
-- Il costo delle chiamate è a carico di chi ospita l'istanza. Quindi **rate
-  limiting per utente** non è opzionale: serve a non far esplodere la spesa.
-- Se la chiave manca o è invalida, la chat si disattiva con un messaggio
-  chiaro ("coach non disponibile"), il resto dell'app (diario, calcoli)
-  continua a funzionare. Il coach è un di più, non una dipendenza dura.
+### Contesto a ogni messaggio
+Il modulo `coach/context.ts` legge da SQLite e costruisce un oggetto
+`CoachContext` strutturato:
+- profilo + BMI calcolato,
+- gusti (liked / avoided / constraints),
+- ultimo peso e storia recente (ultimi 30 giorni),
+- path attivo + ultimi 2 path archiviati,
+- ultime voci di diario,
+- ultimi N messaggi della chat (finestra).
 
-### Come il contesto arriva alla chat (il punto cruciale)
-A **ogni** messaggio dell'utente, prima di chiamare Claude, il backend assembla
-un contesto fresco dai dati reali:
-1. Profilo dell'utente (età, sesso per il calcolo, altezza, attività, goal).
-2. Fabbisogno calcolato dal motore (`/summary/needs`).
-3. Bilancio di oggi e, se rilevante, riepilogo della settimana
-   (`DailyBalance` già calcolati dal motore — **non ricalcolati dall'LLM**).
-4. Ultime N voci di diario.
-5. Preferenze: cibi graditi e da evitare.
-6. Storico recente della conversazione (`chat_messages`), troncato a una
-   finestra ragionevole per non gonfiare i token.
+Iniettato come primo "user message" in formato `<context>...</context>`.
 
-Tutto questo va nel contesto come **dati strutturati (JSON)**, accompagnato dal
-system prompt. La differenza tra una chat utile e un chatbot generico è proprio
-questa: Claude non indovina, legge i numeri che il motore ha già prodotto.
+### System prompt (contratto)
+Vedi §5 e §6: non sostituisce un medico; può proporre percorsi e dialogare
+ma i numeri si ancorano al database; passa i percorsi al motore prima di
+presentarli come "a posto"; tono non giudicante; default `feel_good`.
 
-### System prompt (il contratto)
-Deve:
-- dichiarare il ruolo (assistente di supporto sull'alimentazione, **non
-  medico**, non sostituisce un professionista),
-- **vietare esplicitamente di calcolare o stimare numeri**: usa solo i valori
-  presenti nel contesto; se un dato non c'è, dice "non ho questo dato",
-- imporre tono non giudicante: niente cibi "buoni/cattivi", niente colpa,
-  coerente col requisito etico del §7,
-- ricordare di proporre solo tra i cibi graditi / nel database, senza inventare
-  calorie di piatti che non ci sono.
+### Tool esposti
+- `search_food(query)` — ricerca nel DB locale
+- `add_food(food)` — aggiunge alimento personale (richiede `confirmed=true`)
+- `verify_path(path)` — chiama il motore per validare un percorso
+- `save_path(path)` — salva (con `confirmed=true`)
+- `update_profile(field, value)` — aggiorna profilo (con `confirmed=true`)
+- `add_weight(date, kg)` — registra peso (con `confirmed=true`)
+- `add_preference(kind, value)` — aggiunge gusto (con `confirmed=true`)
+- `set_constraints(text)` — aggiorna note libere (con `confirmed=true`)
+- `add_diary_entry(...)` — registra voce diario (con `confirmed=true`)
 
-### Flusso di una richiesta
-```
-utente scrive su /coach/chat  ->  backend:
-  1. carica dati utente dal motore + DB
-  2. costruisce contesto JSON + system prompt
-  3. chiama Anthropic API con la chiave di sistema
-  4. salva domanda e risposta in chat_messages
-  5. restituisce la risposta al client
-```
+Tutte le scritture passano per **conferma esplicita**: preview senza
+scrittura → utente dice "sì" a parole → re-chiamata con
+`confirmed=true` → scrittura effettiva. Pattern provato nelle v1/v2.
 
-### Esempi di interazione
-- "Cosa potrei mangiare stasera?" → Claude vede preferenze + bilancio residuo
-  del giorno e propone tra i cibi graditi, senza inventare calorie di piatti non
-  in database.
-- "Come sto andando questa settimana?" → Claude riceve i 7 `DailyBalance` già
-  calcolati e li racconta.
-- "Perché mi sento gonfia?" → risponde con supporto, senza diagnosi, e se serve
-  rimanda a un professionista.
+### Loop di tool-use
+Max 5 iterazioni, come nella v2. Se l'LLM continua a chiedere tool senza
+chiudere con un text, abortiamo con messaggio neutro.
 
-### Function calling (fase 2, consigliato)
-Invece di iniettare tutto il contesto a ogni messaggio, esporre tool a Claude:
-`get_daily_balance(date)`, `search_food(query)`, `get_weekly_summary()`,
-`add_diary_entry(...)`. Così Claude chiede i numeri al motore invece di
-riceverli alla cieca, riduce i token, e può anche agire (aggiungere voci di
-diario) su conferma esplicita dell'utente. Tenere ogni `add_*` dietro conferma.
+### Comportamento senza chiave
+La chat è disattivata con un banner chiaro che porta a Impostazioni.
+Il resto dell'app funziona: l'utente può vedere il profilo,
+modificarlo a mano, vedere i percorsi salvati, vedere il diario.
 
-### Sicurezza
-- La API key Anthropic sta solo nel backend (`.env`), mai esposta al client.
-- Rate limiting sulle chiamate LLM per utente (anche per contenere la spesa,
-  vedi sopra).
-- Lo storico chat è scoped sull'utente: nessuno vede le conversazioni altrui.
+## 11bis. Blocco locale (passphrase opzionale)
 
-## 9. API (FastAPI) — superficie minima
+Niente autenticazione tradizionale, ma una protezione locale leggera ha
+senso per uno scenario realistico: **furto del telefono / accesso fisico
+non autorizzato al dispositivo**. Se qualcuno apre l'app dal tuo
+browser senza che ci sia un blocco, vede subito tutta la tua storia
+nutrizionale + ha la possibilità di usare la **tua** chiave Claude
+(che paghi tu) finché non te ne accorgi.
 
-```
-POST /auth/register
-POST /auth/login            -> access + refresh token
-POST /auth/refresh
+### Cosa è il blocco locale (cosa sembra)
 
-GET  /profile
-PUT  /profile
+Tipo "blocco di 1Password". Una passphrase impostata dall'utente
+**localmente nel browser**, mai trasmessa altrove. Funziona così:
 
-GET  /foods?q=&category=    -> ricerca nel database
-POST /foods                 -> alimento personale dell'utente
+- L'utente attiva il blocco da Impostazioni (è opzionale, di default
+  spento per non aggiungere attrito).
+- Definisce una passphrase (libera; suggeriamo lunga e ricordabile).
+- Da quel momento, all'apertura dell'app (o dopo N minuti di inattività)
+  appare una schermata "sblocca" che chiede la passphrase.
+- Senza passphrase corretta, l'app non parte. La chat è inaccessibile,
+  il DB è inaccessibile.
+- "Cambia passphrase" e "Disattiva blocco" sono disponibili
+  conoscendo la passphrase corrente.
 
-GET  /diary?date=
-POST /diary                 -> aggiunge voce
-DELETE /diary/{id}
+### Cosa NON è (cosa non sembra)
 
-GET  /summary/day?date=     -> DailyBalance dal motore
-GET  /summary/week?from=
-GET  /summary/needs         -> fabbisogno calcolato dal profilo
+- **Non è autenticazione**. Non c'è server, non c'è "verifica
+  identità". È solo un freno locale.
+- **Non è un sistema di recovery**. Se dimentichi la passphrase **non
+  c'è un "password dimenticata"** — la chiave Claude e il DB locale
+  vanno persi (o l'utente recupera dal backup `.db` che ha
+  esportato). Questo è un tradeoff esplicito che si dichiara
+  all'attivazione.
 
-POST /weights
-GET  /weights
+### Implementazione concreta
 
-POST /coach/chat            -> {message} -> risposta LLM con contesto
-GET  /coach/history
-```
+Due livelli di sicurezza fra cui scegliere a tempo di disegno:
 
-Tutte le rotte dati sono scoped sull'utente autenticato. Mai fidarsi di uno
-user_id passato dal client: prenderlo dal token.
+**Livello A — protezione UI semplice** (raccomandato per partire):
+- La passphrase produce un hash (es. PBKDF2 / Argon2-WASM) salvato in
+  `localStorage`.
+- All'apertura, la UI confronta l'hash e svela o no l'app.
+- La chiave Claude e il DB SQLite restano **non cifrati** sul disco
+  del browser. Chi ha accesso fisico al dispositivo + skill tecniche
+  (es. apre il DevTools, ispeziona OPFS) può comunque leggerli.
+- È onesto come livello: protegge da chi prende il telefono in mano,
+  non da un analista forense.
 
-## 10. Docker
+**Livello B — cifratura a riposo della chiave e/o del DB**:
+- La passphrase deriva (PBKDF2) una chiave di cifratura.
+- La chiave Claude in `settings` viene cifrata con WebCrypto (AES-GCM)
+  prima di essere salvata.
+- Optional: anche il DB SQLite viene cifrato a riposo (più complesso
+  perché OPFS non ha cifratura nativa; si farebbe scrivendo il `.db`
+  cifrato come blob e tenendo il "DB vivo" solo in RAM, con flush
+  periodico cifrato).
+- Più sicuro contro accesso forense, ma più complesso da
+  implementare e da gestire (ricaricamento dopo crash, performance).
 
-**Immagine singola**, niente Postgres da orchestrare.
+**Decisione**: partiamo con **Livello A** come opzione, da attivare in
+Impostazioni. Aggiunto come **Fase 6.5** (dopo la fase Impostazioni
+chiave Claude) senza bloccare il resto. Livello B resta possibile come
+upgrade futuro se l'utente lo chiede.
 
-- Un Dockerfile che builda l'app FastAPI.
-- Il database SQLite vive in un file su un **volume persistente** montato (es.
-  `/data/nutricoach.db`), così sopravvive a riavvii e aggiornamenti
-  dell'immagine.
-- Entrypoint: applica le migrazioni Alembic + esegue il seed idempotente del
-  database alimenti, poi avvia uvicorn.
-- Abilitare **WAL mode** all'avvio (`PRAGMA journal_mode=WAL;`) per letture e
-  scritture concorrenti.
+## 12. UI / esperienza utente
 
-Un `docker-compose.yml` resta comodo anche con un solo servizio, solo per
-fissare in un posto la mappatura del volume, le porte e le variabili d'ambiente.
-Ma è opzionale: `docker run` con `-v` per il volume e `--env-file` basta.
+### Schermata principale: la chat
+La home (`/`) è la chat con il coach. Non c'è una "dashboard". Il coach
+mostra in alto un riepilogo testuale di chi sei ("ciao Francesco, oggi
+sei a 62.3kg, segui il piano del 2 marzo, restano 4 giorni") e attende
+il tuo messaggio.
 
-`.env` (non committato): `DATABASE_URL=sqlite:////data/nutricoach.db`,
-`ANTHROPIC_API_KEY`, `JWT_SECRET`, `JWT_REFRESH_SECRET`. Fornire `.env.example`
-committato senza valori reali.
+### Sezioni laterali (tab/menu)
+- **Chat** (home)
+- **Percorsi** (lista dei path salvati, con quello `active=1` in
+  evidenza; click su un path → vista dettaglio + bottone "rendi attivo")
+- **Profilo** (i dati base, modificabili a mano se uno preferisce)
+- **Gusti** (liked / avoided / constraints, modificabili a mano)
+- **Peso** (lista cronologica + sparkline)
+- **Diario** (solo se l'utente lo abilita esplicitamente)
+- **Impostazioni** (chiave Claude, modello, hide_calories, export/import,
+  reset DB, disclaimer)
 
-Obiettivo dichiarato: **una sola immagine Docker che si avvia, si collega al db
-alimenti (già popolato dal seed) e offre il coach**, senza passi manuali.
+### Mobile-first
+- Layout a colonna stretta, max-width 720px su desktop.
+- Tab in fondo allo schermo (bottom tab bar) su mobile, sidebar su
+  desktop largo.
+- Tap targets ≥ 44px.
+- Niente hover-only.
+- Composer chat sempre visibile, autoresize.
 
-### Hosting
-Self-host su una macchina personale del committente. Nessuna dipendenza da
-piattaforme cloud o da fasce gratuite. Backup = copia del file `.db` dal volume.
+### Toggle "nascondi calorie"
+In Impostazioni. Maschera i numeri kcal in tutta l'UI con `···`. Coerente
+col vincolo etico.
 
-## 11. Frontend (fase 2)
+### Tono visivo
+Editorial leggero (carta + inchiostro + un solo accento), tipografia
+serif espressiva per i titoli + sans clean per il body. Niente
+gamification, niente badge, niente streak.
 
-API-first: il backend è completo e testabile via OpenAPI prima di toccare la UI.
-Per la UI, opzioni in ordine di leggerezza: HTML+HTMX, oppure un piccolo SPA
-(React/Svelte). Decidere quando il backend è solido. Riusare i concetti della
-UI già prototipata: diario, gusti, andamento peso, chat col coach.
+## 13. Export / import / backup
 
-## 12. Ordine di lavoro per Claude Code
+**Due livelli** di portabilità:
 
-Fasi pensate per essere committabili e verificabili una alla volta.
+### Backup tecnico = `.db` raw
+Pulsante "Esporta backup" che scarica un file `.db` binario. Importabile
+con "Importa backup" che chiede conferma ("vuoi sovrascrivere il
+database corrente?"). Veloce, fedele, leggibile da qualunque tool
+SQLite anche fuori dall'app.
 
-1. **Scaffold**: repo, FastAPI hello-world, Dockerfile, SQLite su volume con
-   WAL, Alembic inizializzato, pytest che gira a vuoto.
-2. **Auth**: users, register/login/refresh, JWT, test.
-3. **Modello dati + migrazioni**: tutte le tabelle di §5.
-4. **Database alimenti**: CSV di seed (~100 alimenti CREA), script di seed
-   idempotente, rotte `/foods`.
-5. **Motore di calcolo**: `core/nutrition.py` + test completi (Mifflin, TDEE,
-   bilanci). Nessun DB qui dentro.
-6. **Diario + summary**: rotte diario, `/summary/*` che usano il motore.
-7. **Pesi + profilo**: rotte e calcolo fabbisogno.
-8. **Coach LLM (chat)**: `core/coach.py`, costruzione del contesto da motore+DB
-   a ogni messaggio, system prompt col contratto di §8, rotta `/coach/chat` +
-   `/coach/history`. Chiave di sistema da `.env`; se assente, chat disattivata
-   con messaggio chiaro e resto dell'app funzionante. Prima versione: contesto
-   iniettato.
-9. **Function calling** (opzionale): tool per il coach come da §8.
-10. **Hardening**: rate limiting, validazioni, disclaimer, gestione errori LLM.
-11. **Frontend**.
+### Export semantico = JSON versionato
+Pulsante "Esporta dati" che scarica un `nutricoach-export-v1-{data}.json`
+con:
+- `export_version`: 1
+- `exported_at`: ISO datetime
+- profile, preferences, constraints, weights, paths, diary, chat history
+- (esclusi: chiave Anthropic, settings tecniche)
 
-## 13. CLAUDE.md (da creare nel repo)
+Importabile da "Importa dati" che ricostruisce il DB. Sopporta versioni
+vecchie via migrazione del JSON.
 
-Il file `CLAUDE.md` è fornito già pronto insieme a questo documento. Ribadisce a
-ogni sessione di Claude Code i vincoli duri:
-- il principio "i numeri li fa il motore, l'LLM parla" (§2),
-- il requisito etico sul goal e sul tono (§7),
-- la convenzione alimenti **da crudo** (§14),
-- "mai esporre la API key, mai fidarsi dello user_id del client",
-- committare a ogni fase, non proseguire se i test non passano.
+### Strategia di sync (per chi vuole più dispositivi)
+Mettere il file `.db` su iCloud Drive / Drive condiviso e fare
+esporta/importa a mano. Niente sync automatico (sarebbe un servizio,
+quindi un fornitore, quindi violerebbe il vincolo §2).
 
-## 14. Decisioni di progetto (chiuse)
+## 14. PWA (Progressive Web App)
 
-Queste erano le domande aperte. Sono chiuse con default ragionevoli; lo script
-di Fase 0 (§15) le ripropone all'utente che può confermare o cambiare.
+- `manifest.json` con nome, icone, theme color, display:standalone.
+- Service worker per **funzionamento offline parziale**: tutto il
+  bundle JS/CSS/WASM in cache. Le sezioni che non richiedono Claude
+  (vedere il proprio profilo, modificare gusti, vedere i path salvati,
+  registrare peso) funzionano offline. La chat richiede rete.
+- "Aggiungi a home" funziona su iOS (Safari) e Android (Chrome) e
+  macOS (Chrome/Edge come app installabile).
 
-- **Nome app**: default `NutriCoach`. Modificabile in Fase 0.
-- **Convenzione crudo/cotto**: gli alimenti nel database sono registrati **da
-  crudo / a peso secco** (es. pasta 100g = ~350 kcal, da pesare prima della
-  cottura). Le porzioni in tabella `portions` sono etichettate di conseguenza
-  ("80 g di pasta cruda"). Questa convenzione va scritta nel `CLAUDE.md` e in un
-  commento del CSV di seed, perché sbagliarla raddoppia i totali.
-- **Modello Claude per il coach**: default `claude-haiku-4-5-20251001` (veloce,
-  economico, adatto a una chat che spiega numeri già calcolati). Alternativa
-  `claude-sonnet-4-6` se si vuole più qualità di dialogo. Configurabile in
-  Fase 0 e via `.env` (`COACH_MODEL`).
-- **Sesso biologico nel calcolo Mifflin**: il profilo separa l'identità dal
-  parametro di calcolo. Campo `calc_basis` ('F'|'M') usato solo per la formula,
-  distinto da come l'utente si identifica. Per profili che non vogliono
-  specificarlo, default a una media delle due formule, dichiarando l'assunzione.
-- **Open Food Facts**: **no in v1**. Si parte col solo seed CREA. L'importer OFF
-  resta predisposto per la v2, con la sua attribuzione ODbL da gestire allora.
+## 15. Ordine di lavoro (fasi)
 
-## 15. Fase 0 — Script di build interattivo (`build.sh`)
+Fasi committabili e verificabili. Niente backend = meno fasi della v2.
 
-Lo scopo dichiarato dal committente: **poter generare immagini Docker diverse
-cambiando parametri in modo facile, senza dover seguire il progetto**. La Fase 0
-serve a questo.
+1. **Scaffold + PWA shell**: SvelteKit con `adapter-static`, manifest,
+   service worker base, layout mobile-first con bottom tab bar.
+   Test: Vitest gira a vuoto, Playwright smoke "la app carica".
 
-### Cosa fa
-Uno script `build.sh` che gira **sulla macchina di sviluppo** (non sul server),
-fa alcune domande, e in fondo produce un'immagine Docker già configurata con le
-**scelte di progetto**. Concentra tutte le decisioni in un unico momento
-all'avvio, così il resto del lavoro procede senza interruzioni.
+2. **SQLite-WASM + persistenza OPFS**: integrare il binario, aprire/
+   creare il `.db`, eseguire migrazioni, helper di query type-safe.
+   Test: aprire, scrivere, chiudere, riaprire, vedere il dato.
 
-### Domande (con default — invio = accetta il default)
-1. Nome dell'app / tag immagine [default: `nutricoach`]
-2. Convenzione alimenti: crudo / cotto [default: crudo]
-3. Modello coach: haiku / sonnet [default: haiku]
-4. Includere Open Food Facts? s/n [default: n]
-5. Lingua dei contenuti e dei seed [default: it]
+3. **Modello dati + seed**: schema SQL di §8, migrazione iniziale,
+   seed di ~100 alimenti CREA da un JSON embed. Test: schema corretto,
+   seed idempotente, query base.
 
-Ogni domanda ha un default sensato: se l'utente preme invio senza rispondere, lo
-script procede da solo. Si può anche lanciare `./build.sh --yes` per accettare
-tutti i default senza domande (utile per ri-build automatici).
+4. **Motore di calcolo (verificatore)**: `engine/nutrition.ts` puro,
+   tutte le formule + verify_path. Test completi.
 
-### Cosa NON chiede (importante)
-Lo script **non** chiede né incorpora segreti: niente API key, niente JWT
-secret. Quelli stanno nel `.env` al momento del deploy (§16). Motivo: un'immagine
-con dentro la chiave è un rischio se l'immagine viene spostata o condivisa.
-L'immagine deve restare "pulita" e riutilizzabile; i segreti si iniettano
-all'avvio. (Se l'uso è strettamente personale su una sola macchina, incorporare
-la chiave è una scorciatoia possibile ma sconsigliata di default.)
+5. **Sezioni "a mano"**: UI di profilo, gusti, peso, diario,
+   impostazioni. CRUD su SQLite via Svelte stores. Niente LLM
+   ancora. Test e2e Playwright dei flussi.
 
-### Come funziona
-- Le risposte vengono scritte in un file `build.config` (committabile, senza
-  segreti) e passate come build-args / variabili al Dockerfile.
-- Le scelte che plasmano i dati (convenzione alimenti, lingua, OFF sì/no)
-  determinano quale seed viene incluso nell'immagine.
-- La scelta del modello finisce come default in `COACH_MODEL`, comunque
-  sovrascrivibile dal `.env` a runtime.
-- Output finale: `docker build` eseguito, immagine taggata col nome scelto,
-  pronta da spostare sul server.
+6. **Impostazioni chiave Claude**: form per inserire/cambiare/cancellare
+   la chiave, salvataggio in `settings`, validazione con call test
+   leggera al SDK Anthropic. Test: chiave salvata, ricaricamento la
+   recupera, validazione mocked.
 
-### Ordine di lavoro
-La Fase 0 va implementata **per ultima**, quando l'app è completa e
-containerizzabile, ma documentata qui perché definisce l'interfaccia di build.
+7. **Coach (chat)**: `coach/context.ts` legge il contesto da SQLite,
+   `coach/llm.ts` chiama Anthropic SDK con tool, `coach/persist.ts`
+   scrive i risultati dei tool nel DB. UI chat (composer, bolle,
+   history). Test: contesto costruito correttamente, tool wired,
+   chiamata mockata. Test e2e con SDK mockato per il flusso completo.
 
-## 16. Deploy su server (Hetzner)
+8. **Percorsi (paths)**: tool `verify_path`, `save_path` collegati
+   al motore (Fase 4); sezione "Percorsi" con lista, dettaglio, "rendi
+   attivo", versioning via `parent_id`. Test sul flusso genera→verifica→
+   rifinisci→salva mockato.
 
-Il deploy è documentato in dettaglio nel file separato `DEPLOY-HETZNER.md`.
-In sintesi: l'immagine costruita in Fase 0 si trasferisce sul server Hetzner, si
-crea un `.env` coi segreti (API key, JWT secret), si avvia il container con un
-volume per il file SQLite, e si mette un reverse proxy (Caddy) davanti per HTTPS
-automatico sul dominio. I segreti vivono solo nel `.env` sul server, mai
-nell'immagine.
+9. **Export / import**: pulsanti per `.db` raw e JSON semantico nelle
+   Impostazioni. Schema JSON versionato. Test round-trip
+   (esporto → cancello DB → importo → tutto torna).
+
+10. **Hardening + polish**: disclaimer modale al primo avvio,
+    onboarding conversazionale (il coach guida la compilazione),
+    error handling LLM (chiave invalida, rate limit, timeout), reset
+    DB con conferma, UX su mobile, accessibility. Deploy su Netlify.
+
+## 16. Decisioni di progetto (chiuse)
+
+- **Stack**: TypeScript + SvelteKit static + sqlite-wasm + OPFS +
+  Anthropic SDK browser-side. Niente Tailwind.
+- **Database**: SQLite locale per dispositivo. No sync automatico.
+- **Chiave Claude**: in `settings` table di SQLite, mai in chiaro fuori.
+- **Multi-utente**: multi-browser. Niente login.
+- **Mobile-first**: il telefono è il primo target.
+- **Distribuzione**: Netlify. PWA installabile come app.
+- **Niente Electron**: la PWA installata è già un'app nativa-like.
+- **Backup**: manuale (export `.db` + export JSON), niente cloud sync.
+- **goal default**: `feel_good`.
+- **BMI**: calcolato e mostrato (numero neutro, niente categorie).
+- **Open Food Facts**: rimandato a v3.1 se mai servirà.
+
+## 17. Cosa si riusa dal vecchio progetto (taaclife/)
+
+Molto poco di codice diretto (Python ≠ TypeScript), ma molto di
+**conoscenza accumulata**:
+
+- **Seed alimenti CSV** (`seed/foods.csv`): si converte in JSON
+  embeddable. ~130 alimenti curati con convenzione da crudo già
+  applicata e label porzioni etichettate. Riuso al 100% dei dati.
+- **System prompt del coach** (`core/coach.py:SYSTEM_PROMPT`): è testo,
+  si traduce in `coach/system_prompt.ts`. Da adattare ai nuovi tool
+  e al nuovo contesto.
+- **Formule del motore** (`core/nutrition.py`): le costanti
+  (ACTIVITY_FACTORS, GOAL_FACTORS) e la logica di Mifflin/TDEE sono
+  ~30 righe di matematica, da riscrivere in TS in mezz'ora.
+- **Lista dei tool** (`core/coach_tools.py`): la struttura dei 4 tool
+  esistenti (search_food, add_diary_entry, get_*) è un buon punto
+  di partenza, da estendere coi nuovi (verify_path, save_path,
+  update_profile, ecc.).
+- **Disclaimer testo** (`app/disclaimer.py`): è italiano puro,
+  riusabile.
+
+Tutto il resto del codice Python (auth, FastAPI, Alembic, Docker,
+build.sh) **non serve più** per questo prodotto.
+
+## 18. CLAUDE.md (vincoli duri da fissare)
+
+Vedi `CLAUDE.md` separato. Sintesi:
+
+1. **Niente backend, niente fornitori**: i dati e la chiave restano nel
+   browser dell'utente. Mai inviare la chiave a servizi terzi (eccetto
+   `api.anthropic.com` direttamente).
+2. **L'LLM propone, il motore verifica**: i numeri sui percorsi
+   passano sempre da `engine/nutrition.ts`. L'LLM non li inventa.
+3. **Scritture solo dietro conferma**: ogni tool che scrive nel DB
+   richiede `confirmed=true`, che si ottiene solo dopo un'esplicita
+   conferma dell'utente nel turno precedente.
+4. **Convenzione alimenti da crudo**: invariata.
+5. **Tono non giudicante, default `feel_good`**: invariato.
+6. **Niente leak della chiave nei log / errori**: ogni handler di
+   eccezione che arriva dal SDK deve produrre messaggi neutri.
+7. **TypeScript strict mode**: niente `any` se non strettamente
+   necessario e commentato.
+8. **`engine/nutrition.ts` puro**: niente import di SQLite o LLM.
+   Riceve dati come argomenti, ritorna risultati. Testabile in
+   isolamento.
+
+## 19. Deploy
+
+`netlify deploy --prod` (o git push su main, con auto-deploy collegato).
+Build di SvelteKit produce `build/` con index.html, assets, service
+worker, manifest. Netlify serve il tutto su HTTPS con dominio
+gratuito `*.netlify.app` o custom domain.
+
+Niente segreti nel deploy: l'app è completamente pubblica come codice
+e come bundle. Le chiavi sono solo nei browser degli utenti.
+
+## 20. Open questions (da chiudere prima di partire)
+
+Nessuna bloccante. Le tre scelte rimaste, ognuna risolvibile in fase:
+
+1. **Nome dell'app**: NutriCoach va bene anche per v3? Cambiamo? La
+   v1 è già pubblica su GitHub come `taaclife`, magari il nome del
+   prodotto e il nome del repo possono divergere.
+2. **Modello Claude di default**: haiku per economicità (utente paga)
+   o sonnet per qualità. Configurabile, ma il default conta.
+3. **Sponsor del seed**: si tiene il seed CREA originale o si fa una
+   pulizia/espansione prima della Fase 3? Si può rimandare a una
+   "Fase 8.5: estensione seed" dopo aver visto come gira con 130
+   alimenti.
