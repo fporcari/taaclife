@@ -17,24 +17,43 @@ from app.models import (
 )
 
 
+class _TextBlock:
+    def __init__(self, text: str) -> None:
+        self.type = "text"
+        self.text = text
+
+
+class _FakeResponse:
+    def __init__(self, text: str, stop_reason: str = "end_turn") -> None:
+        self.content = [_TextBlock(text)] if text else []
+        self.stop_reason = stop_reason
+
+
 class FakeClient:
     """Implementazione fittizia di `CoachClient`: registra le chiamate
-    e ritorna una risposta predefinita."""
+    e ritorna una risposta di solo testo (nessun tool_use)."""
 
     def __init__(self, reply: str = "ciao") -> None:
         self.reply = reply
         self.calls: list[dict[str, Any]] = []
 
-    def complete(self, *, system: str, messages: list[dict[str, str]]) -> str:
+    def complete(self, *, system: str, messages):
         self.calls.append({"system": system, "messages": messages})
         return self.reply
+
+    def complete_with_tools(self, *, system, messages, tools):
+        self.calls.append({"system": system, "messages": messages, "tools": tools})
+        return _FakeResponse(text=self.reply, stop_reason="end_turn")
 
 
 class FailingClient:
     def __init__(self, exc: Exception) -> None:
         self.exc = exc
 
-    def complete(self, *, system: str, messages: list[dict[str, str]]) -> str:
+    def complete(self, *, system, messages):
+        raise self.exc
+
+    def complete_with_tools(self, *, system, messages, tools):
         raise self.exc
 
 

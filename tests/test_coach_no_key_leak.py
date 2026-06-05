@@ -38,6 +38,11 @@ class LeakyUnavailableClient:
             f"errore upstream con chiave {SECRET_LIKE_KEY}"
         )
 
+    def complete_with_tools(self, *, system, messages, tools):  # type: ignore[no-untyped-def]
+        raise CoachUnavailableError(
+            f"errore upstream con chiave {SECRET_LIKE_KEY}"
+        )
+
 
 def _setup_user(client: TestClient, db_session) -> str:
     r = client.post("/auth/register", json={"email": "alice@example.com", "password": "abcdefgh"})

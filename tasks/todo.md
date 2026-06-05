@@ -634,3 +634,111 @@ chiave assente, **senza chiamare davvero l'API**.
 - Senza ANTHROPIC_API_KEY: l'app parte, 19 rotte registrate,
   /coach/chat -> 503 con messaggio neutro, tutte le altre
   rispondono normalmente. (verificato)
+
+---
+
+## Fase 9 — Function calling
+
+Obiettivo (PROJECT.md §8, §12.9): esporre al coach i tool
+`get_daily_balance`, `get_weekly_summary`, `search_food`,
+`add_diary_entry`. Le azioni di scrittura (oggi solo
+`add_diary_entry`) richiedono conferma esplicita dell'utente.
+
+### Decisioni di fase
+
+- **Definizioni tool in `core/coach_tools.py` (puro)**: schema
+  JSON dei tool come costanti, niente SDK ne' DB. Test AST sulla
+  purezza.
+- **Execution in `app/coach/tool_runner.py`** (ha DB + motore):
+  classe `ToolRunner(db, user, today)` con metodo `run(name, input)
+  -> dict`. Tutti i tool sono scoped sull'utente passato al
+  costruttore: il `user_id` non e' mai letto dall'input del tool.
+- **Loop tool-use** in `app/coach/router.py`: il client chiama
+  Anthropic con `tools=...`; finche' `stop_reason == "tool_use"`,
+  esegue i tool richiesti e rilancia con i risultati. Limite
+  iterazioni: 5 (anti-loop, anti-spesa). Test apposito.
+- **Conferma esplicita su `add_diary_entry`**: input ha campo
+  `confirmed` (bool, default False). Se `False`/assente -> il
+  tool ritorna `{"status": "needs_confirmation", "preview":
+  {kcal, protein_g, ...}, "draft": {...}}` SENZA scrivere. Solo
+  con `confirmed=True` la voce viene inserita -> 
+  `{"status": "added", "entry_id": ..., "totals_added": {...}}`.
+  Test su entrambi i rami.
+- **System prompt aggiornato**: clausola sul protocollo dei tool
+  e su "proporre, poi richiamare con confirmed=true solo dopo
+  consenso esplicito dell'utente nel messaggio successivo".
+- **Wrapper Anthropic**: nuovo metodo
+  `complete_with_tools(system, messages, tools)` che ritorna
+  l'oggetto messaggio (`content` blocks + `stop_reason`). Il
+  vecchio `complete` resta per i test esistenti. I test fittizi
+  implementano il nuovo metodo.
+- **Contesto + tool insieme**: PROJECT.md §8 propone tool
+  "invece di" iniettare; in F9 li teniamo **entrambi** (il
+  contesto e' gia' pronto e leggero, i tool servono per dati
+  on-demand). Documentato nella docstring del router.
+- **Niente nuove rotte**: il tool flow e' interno a
+  `/coach/chat`. La conferma utente passa per il linguaggio
+  naturale al prossimo turno.
+
+### Vincoli duri rispettati
+
+- "I numeri li fa il motore": i tool `get_daily_balance`/
+  `get_weekly_summary` chiamano `compute_daily_balance` /
+  `compute_needs` come gia' fa `/summary/*`. Test che verifica
+  che i risultati combaciano col motore chiamato direttamente.
+- "Scoped sull'utente del token": il `user_id` arriva al
+  `ToolRunner` da `current_user.id`, mai dall'input del tool.
+  Test: tool su Alice non vede food personale di Bob.
+- "Niente API key esposta": invariato; il wrapper neutralizza
+  gli errori SDK come gia' in F8.
+- "Niente azioni in scrittura senza conferma": test esplicito
+  che `add_diary_entry` senza `confirmed=True` non crea righe
+  in `diary_entries`.
+
+### Checklist
+
+- [x] `core/coach_tools.py`: 4 TOOLS (get_daily_balance,
+      get_weekly_summary, search_food, add_diary_entry).
+      Test AST conferma purezza.
+- [x] `core/coach.py` SYSTEM_PROMPT esteso con clausole 6
+      (tool disponibili) e 7 (protocollo di conferma per
+      add_diary_entry: preview con confirmed=false, poi
+      richiamo con confirmed=true solo dopo consenso esplicito).
+- [x] `app/coach/tool_runner.py`: `ToolRunner` con
+      `get_daily_balance` / `get_weekly_summary` (numeri dal
+      motore, profilo incompleto -> {error,missing}),
+      `search_food` (visibilita': pubblici + propri),
+      `add_diary_entry` (preview senza scrittura se
+      confirmed!=true, scrittura altrimenti).
+      `ToolError` -> payload `{error: ...}` per Claude;
+      `UnknownToolError` ne e' sottoclasse (chat resiliente).
+- [x] `app/coach/llm.py`: `complete_with_tools` aggiunto
+      al Protocol; mantiene il filtraggio neutro degli
+      errori SDK (no leak della chiave).
+- [x] `app/coach/router.py`: loop di tool-use (max 5 iter);
+      tool_result serializzati come JSON string. >5 ->
+      503 neutro. Tool errors -> rimandati a Claude.
+- [x] `tests/test_coach_purity.py`: parametrizzato per
+      `core/coach.py` e `core/coach_tools.py`.
+- [x] `tests/test_coach_tools.py` (16): schema 4 tool con
+      `confirmed` opzionale; runner per ognuno con dati noti;
+      preview senza scrittura, confirmed -> scrittura;
+      scoping (food personale di Bob invisibile ad Alice);
+      profilo incompleto -> {error,missing}; meal invalido
+      / grams 0 -> ToolError.
+- [x] `tests/test_coach_tools_loop.py` (5): tool_use ->
+      text; preview poi confirmed in due turni; >5 iter ->
+      503; tool sconosciuto -> {error} per LLM (chat ok);
+      ToolError -> {error} per LLM.
+- [x] `tests/test_coach_route.py` aggiornato col fake che
+      implementa `complete_with_tools`.
+- [x] `tests/test_coach_no_key_leak.py` aggiornato con
+      `complete_with_tools` sullo leaky client.
+- [x] `pytest` verde: 185 passed.
+- [x] Commit di fine fase citando la Fase 9.
+
+### Verifica end-to-end (manuale)
+
+- `core.coach_tools.TOOLS` -> 4 tool; tutti gli schema validi.
+- `ToolRunner.run` su utente con profilo+diario funziona per
+  tutti e 4 i tool (verificato dai test).

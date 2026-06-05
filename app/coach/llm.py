@@ -8,7 +8,7 @@ header/diagnostica; qui le rimappiamo in un messaggio neutro
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from typing import Any, Protocol
 
 import anthropic
 
@@ -24,6 +24,13 @@ class CoachUnavailableError(RuntimeError):
 
 class CoachClient(Protocol):
     def complete(self, *, system: str, messages: list[dict[str, str]]) -> str: ...
+
+    def complete_with_tools(
+        self, *, system: str, messages: list[dict[str, Any]], tools: list[dict]
+    ) -> Any:
+        """Ritorna l'oggetto messaggio del SDK (con `.content` blocks
+        e `.stop_reason`). Usato nel loop di tool-use."""
+        ...
 
 
 class AnthropicCoachClient:
@@ -77,3 +84,34 @@ class AnthropicCoachClient:
             if text:
                 chunks.append(text)
         return "".join(chunks).strip()
+
+    def complete_with_tools(
+        self, *, system: str, messages: list[dict[str, Any]], tools: list[dict]
+    ) -> Any:
+        try:
+            return self._client.messages.create(
+                model=self._model,
+                max_tokens=self._max_tokens,
+                system=system,
+                messages=messages,
+                tools=tools,
+            )
+        except anthropic.AuthenticationError:
+            logger.warning("coach: errore autenticazione Anthropic")
+            raise CoachUnavailableError(
+                "coach non disponibile (autenticazione fallita)"
+            ) from None
+        except anthropic.APIConnectionError:
+            logger.warning("coach: errore di rete verso Anthropic")
+            raise CoachUnavailableError("coach non disponibile (rete)") from None
+        except anthropic.RateLimitError:
+            logger.warning("coach: rate limit lato Anthropic")
+            raise CoachUnavailableError(
+                "coach non disponibile (rate limit upstream)"
+            ) from None
+        except anthropic.APIError as exc:
+            status = getattr(exc, "status_code", "?")
+            logger.warning("coach: API error status=%s", status)
+            raise CoachUnavailableError(
+                "coach non disponibile (errore upstream)"
+            ) from None

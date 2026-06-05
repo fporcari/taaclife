@@ -7,11 +7,18 @@ in app/coach/.
 import ast
 from pathlib import Path
 
+import pytest
 
-def test_core_coach_is_pure() -> None:
-    src = (Path(__file__).resolve().parents[1] / "core" / "coach.py").read_text()
-    tree = ast.parse(src)
+FORBIDDEN = {
+    "anthropic", "httpx", "requests", "urllib3",
+    "sqlalchemy", "alembic",
+    "fastapi", "starlette", "pydantic", "pydantic_settings",
+    "app",
+}
 
+
+def _imported_top_level(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text())
     modules: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -20,12 +27,14 @@ def test_core_coach_is_pure() -> None:
         elif isinstance(node, ast.ImportFrom):
             if node.module:
                 modules.add(node.module.split(".")[0])
+    return modules
 
-    forbidden = {
-        "anthropic", "httpx", "requests", "urllib3",
-        "sqlalchemy", "alembic",
-        "fastapi", "starlette", "pydantic", "pydantic_settings",
-        "app",
-    }
-    leaks = modules & forbidden
-    assert not leaks, f"core/coach.py importa moduli vietati: {leaks}"
+
+@pytest.mark.parametrize("relative_path", [
+    "core/coach.py",
+    "core/coach_tools.py",
+])
+def test_core_coach_modules_are_pure(relative_path: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    leaks = _imported_top_level(root / relative_path) & FORBIDDEN
+    assert not leaks, f"{relative_path} importa moduli vietati: {leaks}"
