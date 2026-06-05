@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from app.auth.router import router as auth_router
+from app.coach.router import router as coach_router
 from app.diary.router import router as diary_router
 from app.foods.router import router as foods_router
 from app.profile.router import router as profile_router
@@ -21,6 +22,7 @@ def create_app() -> FastAPI:
     app.include_router(diary_router)
     app.include_router(summary_router)
     app.include_router(weights_router)
+    app.include_router(coach_router)
     return app
 
 

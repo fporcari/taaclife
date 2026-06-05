@@ -513,3 +513,124 @@ profilo via motore (e' gia' wired in F6: in F7 lo rendiamo raggiungibile
 
 - Tutte le rotte di PROJECT.md §9 (eccetto `/coach/*`) registrate:
   auth, profile, foods, diary, summary, weights. (verificato)
+
+---
+
+## Fase 8 — Coach (chat LLM)
+
+Obiettivo (PROJECT.md §8, §12.8): `core/coach.py` puro con la
+costruzione del contesto + system prompt del contratto §8. Rotte
+`POST /coach/chat` e `GET /coach/history`. Chiave Anthropic solo
+nel backend, mai esposta. Se manca: chat disattivata, resto dell'app
+funzionante. Rate limiting per utente. Test sul contesto e sul caso
+chiave assente, **senza chiamare davvero l'API**.
+
+### Decisioni di fase
+
+- **`core/coach.py` puro**: solo stdlib + dataclass; nessun
+  `anthropic`, `sqlalchemy`, `fastapi`, `app.*`. Test AST.
+  Definisce `CoachContext`, `SYSTEM_PROMPT`, `build_context_payload`
+  (serializza il contesto in JSON da iniettare come primo
+  messaggio user), `truncate_history`.
+- **Pattern di prompting**: system prompt statico (il contratto §8) +
+  primo messaggio "user" con `<context>...</context>` JSON dei dati
+  reali + messaggi della conversazione tronca. Prompt cache friendly.
+- **Adapter `app/coach/context_builder.py`**: aggrega dal DB +
+  motore: profilo, Needs (gestendo `ProfileIncompleteError` -> flag
+  `needs_missing`), DailyBalance oggi, settimana corrente,
+  ultime 20 voci di diario, preferenze liked/avoided, ultimi 20
+  chat_messages.
+- **Client Anthropic in `app/coach/llm.py`**: wrapper che lavora
+  solo se la chiave c'e'. Errori Anthropic -> `CoachUnavailableError`
+  (catturato dal router in 503). Niente log della chiave (filtraggio
+  esplicito sul messaggio di errore).
+- **Rate limit in-memory** (`app/coach/rate_limit.py`):
+  `SlidingWindowLimiter(max=30, window=3600s)` di default. Niente
+  Redis (single-process, self-host). Configurabile via
+  `COACH_RATE_LIMIT_PER_HOUR`. 429 con detail informativo.
+- **Disponibilita'**: nessuna verifica all'avvio. Verifica lazy al
+  primo `/coach/chat`. Se chiave vuota -> 503. App per il resto
+  continua a girare.
+- **Storico**: `GET /coach/history` paginato (limit max 200,
+  default 50), ordine cronologico. Scoped sull'utente del token.
+- **DI per il client**: `get_coach_client()` dependency, override
+  nei test con un fake (mai chiamiamo davvero Anthropic).
+- **`anthropic` come requirement**: aggiunta in `requirements.txt`.
+  Import dentro `app/coach/llm.py` solo quando si istanzia il
+  client (lazy via `from anthropic import ...` a livello modulo,
+  ma il modulo viene importato solo se serve la chat -- ok,
+  in pratica all'avvio importiamo anche app.coach -> caricheremo
+  anthropic ma senza istanziarlo).
+
+### Vincoli duri rispettati
+
+- "I numeri li fa il motore": il contesto contiene **valori gia'
+  calcolati** dal motore; il system prompt vieta esplicitamente di
+  ricalcolarli. Test sul contenuto del prompt.
+- "API key solo nel backend, mai esposta o loggata": test esplicito
+  con monkeypatch di un client che mette la chiave nel messaggio
+  di errore -> verifico che la risposta HTTP e i log NON la
+  contengano.
+- "Tono non giudicante, non sostituisce un medico": parole
+  chiave verificate nel system prompt.
+- "Scoped sull'utente del token": history Alice vs Bob.
+- "Chiave assente -> chat off, resto funziona": test che con
+  `ANTHROPIC_API_KEY=""` /coach/chat -> 503 ma `/health`,
+  `/auth/me`, `/foods`, `/summary/*` continuano a rispondere.
+- "Rate limiting per utente": configurabile, scoped per user_id.
+
+### Checklist
+
+- [x] `requirements.txt`: `anthropic==0.42.0`.
+- [x] `app/settings.py`: `coach_rate_limit_per_hour` (default 30) e
+      `coach_max_tokens` (default 1024).
+- [x] `core/coach.py` puro: `CoachContext` + summaries,
+      `SYSTEM_PROMPT` contratto §8, `build_context_payload`,
+      `truncate_history`, `build_messages`. Niente
+      anthropic/sqlalchemy/fastapi/app. AST test verifica.
+- [x] `app/coach/`: `context_builder.py` (aggrega DB+motore in
+      `CoachContext`), `llm.py` (`AnthropicCoachClient`,
+      `CoachUnavailableError`; mappa errori SDK in messaggi
+      neutri senza chiave), `rate_limit.py`
+      (`SlidingWindowLimiter` in-memory), `router.py`
+      (POST /chat, GET /history), `deps.py`
+      (`get_coach_client`, `get_rate_limiter`).
+- [x] `app/schemas/coach.py`: ChatIn, ChatOut, ChatMessageOut.
+- [x] `app/main.py`: include router coach.
+- [x] `tests/test_coach_purity.py`: AST.
+- [x] `tests/test_coach_system_prompt.py`: clausole chiave
+      del contratto §8 (no medico, no calcoli, "non ho questo
+      dato", tono non giudicante, "buoni/cattivi"/"colpa",
+      preferenze + database, no linguaggio diagnostico).
+- [x] `tests/test_coach_context.py`: builder con profilo
+      completo (BMR/TDEE attesi), profilo incompleto
+      (`needs_missing="weight_kg"`), today_balance dal motore,
+      recent_diary troncato a RECENT_DIARY_LIMIT, preferenze
+      separate liked/avoided, history troncata e cronologica.
+- [x] `tests/test_coach_route.py`: 401, 503 con chiave assente,
+      fake client -> messaggi salvati + history, scoping Alice
+      vs Bob, rate limit 429 al superamento, fake che alza
+      CoachUnavailableError -> 503, contesto include i numeri
+      del motore (BMR 1320.25 / TDEE 2046.3875), chat con
+      profilo incompleto continua a funzionare con
+      `needs_missing` valorizzato.
+- [x] `tests/test_coach_no_key_leak.py`:
+      - AnthropicCoachClient cattura AuthenticationError SDK
+        (anche se contiene la chiave) e rilancia messaggio
+        neutro; chiave non nei log né nel detail.
+      - Test parallelo che mostra che il filtraggio vive nel
+        wrapper, non nel router.
+- [x] `tests/test_app_works_without_coach.py`: chiave assente,
+      /health, /auth, /foods, /summary/needs, /coach/history
+      rispondono normalmente; /coach/chat -> 503.
+- [x] `tests/test_rate_limit.py` (6 unit test): sotto/al limite,
+      isolation per key, finestra che scorre,
+      seconds_until_next_slot, validazione costruzione.
+- [x] `pytest` verde: 163 passed.
+- [x] Commit di fine fase citando la Fase 8.
+
+### Verifica end-to-end (manuale)
+
+- Senza ANTHROPIC_API_KEY: l'app parte, 19 rotte registrate,
+  /coach/chat -> 503 con messaggio neutro, tutte le altre
+  rispondono normalmente. (verificato)

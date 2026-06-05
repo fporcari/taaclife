@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     )
     jwt_secret: str = Field(default="", alias="JWT_SECRET")
     jwt_refresh_secret: str = Field(default="", alias="JWT_REFRESH_SECRET")
+    coach_rate_limit_per_hour: int = Field(
+        default=30, alias="COACH_RATE_LIMIT_PER_HOUR"
+    )
+    coach_max_tokens: int = Field(default=1024, alias="COACH_MAX_TOKENS")
 
 
 def get_settings() -> Settings:
