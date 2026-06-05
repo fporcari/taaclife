@@ -38,3 +38,6 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# Script di smoke test locali (non committati)
+scripts/
