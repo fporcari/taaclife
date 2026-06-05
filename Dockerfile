@@ -18,6 +18,7 @@ COPY app ./app
 COPY core ./core
 COPY alembic ./alembic
 COPY alembic.ini ./alembic.ini
+COPY seed ./seed
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 

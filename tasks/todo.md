@@ -198,3 +198,76 @@ Test che migrazioni applicano e rollback è pulito.
   profiles + weight_logs + foods + portions + diary_entries +
   preference_items + chat_messages) + `alembic_version`. (verificato)
 - `alembic downgrade base` lascia solo `alembic_version`. (verificato)
+
+---
+
+## Fase 4 — Database alimenti
+
+Obiettivo (PROJECT.md §6 e §12.4): CSV di seed di ~100 alimenti italiani da
+CREA, convenzione DA CRUDO; script di seed idempotente; rotte `GET /foods`
+con ricerca + filtro categoria e `POST /foods` per alimenti personali.
+
+### Decisioni di fase
+
+- File `seed/foods.csv` con header commenti `#` (skippati dal reader). Header
+  CSV vero: `name,category,kcal_100g,protein_100g,carbs_100g,fat_100g,
+  fiber_100g,portions` dove `portions` è una stringa
+  `label1:grams1|label2:grams2` (semplice, niente JSON innestato nella CSV).
+- Convenzione **DA CRUDO / peso secco** documentata in tre punti:
+  1. commento `#` in testa al CSV, 2. docstring di `app/seed.py`,
+  3. label delle porzioni quando ambigue (es. "80 g (pasta cruda)").
+- Script di seed: `app/seed.py` con `seed_foods(db, csv_path) -> int`.
+  Idempotente: se `foods` non è vuoto ritorna 0. Eseguibile come
+  `python -m app.seed`.
+- Aggancio in `entrypoint.sh`: `alembic upgrade head` → seed → uvicorn.
+- Rotta `GET /foods`: protetta JWT; visibilità = `is_public=True OR
+  created_by=user.id` (mai esposti alimenti personali altrui — vincolo
+  CLAUDE.md §3 "ogni rotta scoped sull'utente del token"); query params
+  `q` (LIKE case-insensitive su `name`), `category` (match esatto),
+  `limit` (default 50, max 200), `offset` (default 0).
+- Rotta `POST /foods`: protetta JWT; crea food personale con `source='user'`,
+  `is_public=False`, `created_by=user.id`. Accetta porzioni opzionali.
+- Niente `GET /foods/{id}` in F4 (non richiesto dal goal; rinviato a F6).
+- Categoria: stringa libera (validata solo per lunghezza). La lista di
+  categorie effettivamente in uso emerge dal seed.
+
+### Vincoli duri rispettati
+
+- Numeri da fonte CREA, valori per 100 g **da crudo**: commento esplicito
+  nel CSV e nelle docstring.
+- `POST /foods`: `created_by` viene **sempre** preso da `current_user.id`,
+  mai dal body (anche se il client lo manda, viene ignorato).
+- `GET /foods` non espone mai alimenti personali di altri utenti.
+- Niente API key LLM in F4.
+
+### Checklist
+
+- [x] `seed/foods.csv` con 133 alimenti italiani comuni in 13 categorie
+      (cereali, legumi, carni, salumi, pesce, uova, latticini, oli e
+      grassi, frutta, verdure, frutta secca, dolci e zuccheri, bevande).
+      Commenti `#` in testa: fonte CREA, convenzione DA CRUDO.
+- [x] `app/seed.py`: `load_foods_from_csv()`, `seed_foods(db)` idempotente,
+      `main()` per `python -m app.seed`. Docstring che ribadisce DA CRUDO.
+- [x] `app/schemas/foods.py`: `PortionIn/Out`, `FoodOut`, `FoodCreateIn`
+      (no `created_by`/`source`/`is_public` esposti in input).
+- [x] `app/foods/router.py`: `GET /foods` scoped sull'utente,
+      `POST /foods` con `source/is_public/created_by` impostati dal server.
+- [x] `app/main.py`: include router foods.
+- [x] `entrypoint.sh`: `python -m app.seed` dopo `alembic upgrade head`.
+- [x] `Dockerfile`: copia `seed/` nell'immagine.
+- [x] `tests/test_seed.py`: caricamento CSV, popolamento, idempotenza,
+      attributi (source CREA, is_public, no owner), label "crud" presente
+      sugli alimenti che lo richiedono.
+- [x] `tests/test_foods.py`: 401 senza token, ricerca case-insensitive,
+      filtro categoria, paginazione, cap limit, creazione personale,
+      validazione kcal>=0, scoping (Alice vs Bob), tentativo spoofing
+      `created_by` ignorato, food senza porzioni.
+- [x] `pytest` verde: 47 passed.
+- [x] End-to-end CLI: 133 alimenti + 140 porzioni seedati; secondo run
+      idempotente (skip).
+- [x] Commit di fine fase citando la Fase 4.
+
+### Verifica end-to-end (manuale)
+
+- `python -m app.seed` su DB pulito (dopo `alembic upgrade head`) popola
+  133 foods e 140 porzioni. Secondo run: skip. (verificato)
